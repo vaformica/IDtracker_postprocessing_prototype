@@ -9,6 +9,7 @@ h1,h2{line-height:1.2} code{background:#eef2f5;padding:.1em .3em}
 .warning{border-left:6px solid #b42318;background:#fff1f0;padding:14px 18px}
 .note{border-left:6px solid #175cd3;background:#eff8ff;padding:14px 18px}
 table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8px;text-align:left}
+.formula{margin:12px 30px;font:20px Georgia,serif}
 </style>
 </head>
 <body>
@@ -195,18 +196,19 @@ user-selected assumption that the missing beetle occupies the visible partner's
 centroid during a qualifying overlap. It can create substantial entry and exit
 movement steps. The CSV and PDF explicitly identify whether it was used and
 how many frames were substituted for each animal.</div>
-<p>In mathematical notation, let \(\mathbf{p}_{i,f}\) be the original
-IDtracker coordinate for animal \(i\) at frame \(f\), and let \(j\) be the
+<p>In mathematical notation, let <strong>p</strong><sub>i,f</sub> be the original
+IDtracker coordinate for animal <em>i</em> at frame <em>f</em>, and let <em>j</em> be the
 visible partner. For a qualifying social-disappearance frame, the effective
 coordinate used by the enabled calculation switch is</p>
-<p class="formula">\[
-\mathbf{p}^{*}_{i,f} = \mathbf{p}_{j,f}.
-\]</p>
-<p>At every other frame, \(\mathbf{p}^{*}_{i,f}=\mathbf{p}_{i,f}\). Total
-distance and wall/fungus location calculations use \(\mathbf{p}^{*}\);
+<p class="formula"><strong>p</strong><sup>*</sup><sub>i,f</sub>
+= <strong>p</strong><sub>j,f</sub>.</p>
+<p>At every other frame,
+<strong>p</strong><sup>*</sup><sub>i,f</sub> =
+<strong>p</strong><sub>i,f</sub>. Total distance and wall/fungus location
+calculations use <strong>p</strong><sup>*</sup>;
 latency, social-event detection, and original missing-data counts continue to
-use \(\mathbf{p}\). When the switch is off, \(\mathbf{p}^{*}=\mathbf{p}\)
-for all frames.</p>
+use <strong>p</strong>. When the switch is off,
+<strong>p</strong><sup>*</sup> = <strong>p</strong> for all frames.</p>
 
 <h2>PDF audit plots</h2>
 <p>Each processed session receives one multipage PDF in

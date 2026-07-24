@@ -3,11 +3,15 @@
 This is a separate, review-first replacement prototype. It does not import or
 call the legacy post-processing scripts.
 
-## Where the files are
+## Standalone repository
 
-The development copy is in:
+The independent Git repository is:
 
-`/Users/New/.codex/.chatgpt-projects/g-p-690a75e32d908191b55ac042a5467836/firebird_postprocessing_v1`
+`/Users/New/Library/CloudStorage/Dropbox/Projects/Coding_Repositories/IDtracker_postprocessing_prototype`
+
+It has its own `VERSION`, `CHANGELOG.md`, commits, and version tags. It is not
+part of `One_script_to_rule_them_all` and does not import or modify that
+pipeline.
 
 The installer places the Firebird copy in:
 
