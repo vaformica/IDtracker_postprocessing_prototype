@@ -60,7 +60,17 @@ OUTPUT_COLUMNS = [
     "social_analysis_status",
     "use_social_disappearance_in_calculations",
     "social_disappearance_imputed_frames",
+    "remaining_missing_coordinate_frames_after_social_substitution",
     "coordinate_frames_used_in_distance_and_location_calculations",
+    "turtling_candidate_frames",
+    "turtling_candidate_events",
+    "turtling_detector_status",
+    "turtling_window_frames",
+    "turtling_min_path_px",
+    "turtling_max_radius90_px",
+    "turtling_min_turn_rotations",
+    "turtling_max_straightness",
+    "turtling_max_step_px",
     "baseline_x_px",
     "baseline_y_px",
     "valid_coordinate_frames_in_window",
@@ -352,6 +362,110 @@ def compute_social_candidates(
     }
 
 
+def compute_turtling_candidates(
+    xy: np.ndarray,
+    window_frames: int = 120,
+    min_path_px: float = 120.0,
+    max_radius90_px: float = 35.0,
+    min_turn_rotations: float = 3.0,
+    max_straightness: float = 0.25,
+    max_step_px: float = 20.0,
+) -> dict:
+    """Screen for sustained tight looping using original centroid coordinates.
+
+    This is deliberately a trajectory candidate detector, not a posture
+    classifier. It never uses social-disappearance substitutions.
+    """
+    xy = np.asarray(xy, dtype=float)
+    frame_count = len(xy)
+    candidate_mask = np.zeros(frame_count, dtype=bool)
+    if frame_count < window_frames:
+        return {
+            "mask": candidate_mask,
+            "events": [],
+            "status": "NOT_CALCULATED_WINDOW_LONGER_THAN_ANALYSIS",
+        }
+
+    for start_offset in range(frame_count - window_frames + 1):
+        stop_offset = start_offset + window_frames
+        block = xy[start_offset:stop_offset]
+        valid = np.isfinite(block).all(axis=1)
+
+        # Up to 5% missing positions may occur, but missing gaps are never
+        # bridged and missing frames are never labeled as candidates.
+        if float(valid.mean()) < 0.95:
+            continue
+
+        step_vectors = np.diff(block, axis=0)
+        valid_steps = valid[:-1] & valid[1:]
+        step_lengths = np.linalg.norm(step_vectors, axis=1)
+        if (
+            valid_steps.any()
+            and float(step_lengths[valid_steps].max()) > max_step_px
+        ):
+            continue
+
+        # Sub-pixel centroid movement is excluded from path and turn evidence
+        # so stationary tracking jitter cannot by itself create a candidate.
+        moving_steps = valid_steps & (step_lengths >= 1.0)
+        path_px = float(step_lengths[moving_steps].sum())
+        if path_px < min_path_px:
+            continue
+
+        observed_points = block[valid]
+        center = np.median(observed_points, axis=0)
+        radii = np.linalg.norm(observed_points - center, axis=1)
+        radius90_px = float(np.quantile(radii, 0.90))
+        if not 5.0 <= radius90_px <= max_radius90_px:
+            continue
+
+        consecutive_moving_steps = moving_steps[:-1] & moving_steps[1:]
+        if not consecutive_moving_steps.any():
+            continue
+        headings = np.arctan2(step_vectors[:, 1], step_vectors[:, 0])
+        heading_changes = np.arctan2(
+            np.sin(np.diff(headings)),
+            np.cos(np.diff(headings)),
+        )
+        absolute_turn_rotations = float(
+            np.abs(heading_changes[consecutive_moving_steps]).sum()
+            / (2.0 * np.pi)
+        )
+        if absolute_turn_rotations < min_turn_rotations:
+            continue
+
+        observed_indices = np.flatnonzero(valid)
+        net_displacement_px = float(
+            np.linalg.norm(
+                block[int(observed_indices[-1])]
+                - block[int(observed_indices[0])]
+            )
+        )
+        if net_displacement_px / path_px > max_straightness:
+            continue
+
+        candidate_mask[start_offset:stop_offset] |= valid
+
+    changes = np.diff(
+        np.concatenate(([False], candidate_mask, [False])).astype(np.int8)
+    )
+    starts = np.flatnonzero(changes == 1)
+    stops = np.flatnonzero(changes == -1)
+    events = [
+        {
+            "start_offset": int(event_start),
+            "end_offset": int(event_stop - 1),
+            "frames": int(event_stop - event_start),
+        }
+        for event_start, event_stop in zip(starts, stops)
+    ]
+    return {
+        "mask": candidate_mask,
+        "events": events,
+        "status": "CALCULATED_PROVISIONAL_CENTROID_PATH_CANDIDATES",
+    }
+
+
 def analyze(
     trajectory_file: Path,
     session_folder: Path,
@@ -363,6 +477,12 @@ def analyze(
     analysis_type: str = "",
     social_distance_threshold_px: float = 60.0,
     use_social_disappearance_in_calculations: bool = False,
+    turtling_window_frames: int = 120,
+    turtling_min_path_px: float = 120.0,
+    turtling_max_radius90_px: float = 35.0,
+    turtling_min_turn_rotations: float = 3.0,
+    turtling_max_straightness: float = 0.25,
+    turtling_max_step_px: float = 20.0,
 ) -> list[dict]:
     if start <= 0:
         raise ValueError("Analysis start must be greater than zero; zero is a data-entry flag")
@@ -372,6 +492,20 @@ def analyze(
         raise ValueError("ROI-buffer widths cannot be negative")
     if social_distance_threshold_px <= 0:
         raise ValueError("The social-distance threshold must be positive")
+    if turtling_window_frames < 3:
+        raise ValueError("The turtling window must contain at least 3 frames")
+    if (
+        turtling_min_path_px <= 0
+        or turtling_max_radius90_px < 5
+        or turtling_min_turn_rotations <= 0
+        or not 0 <= turtling_max_straightness <= 1
+        or turtling_max_step_px <= 0
+    ):
+        raise ValueError(
+            "Invalid turtling settings: path, turns, and maximum step must be "
+            "positive; radius90 must be at least 5 pixels; maximum "
+            "straightness must be a proportion from 0 through 1"
+        )
 
     trajectory_source_kind = validate_trajectory_source(
         trajectory_file
@@ -423,6 +557,18 @@ def analyze(
             imputed_frames_by_animal[missing_animal] = int(
                 impute_mask.sum()
             )
+    turtling_by_animal = [
+        compute_turtling_candidates(
+            window_arr[:, animal, :],
+            window_frames=turtling_window_frames,
+            min_path_px=turtling_min_path_px,
+            max_radius90_px=turtling_max_radius90_px,
+            min_turn_rotations=turtling_min_turn_rotations,
+            max_straightness=turtling_max_straightness,
+            max_step_px=turtling_max_step_px,
+        )
+        for animal in range(window_arr.shape[1])
+    ]
     starting_sides = ["NOT_APPLICABLE_NOT_FIGHT"] * window_arr.shape[1]
     if is_fight:
         starting_sides = ["UNASSIGNED_EXPECTED_TWO_ANIMALS"] * window_arr.shape[1]
@@ -508,6 +654,14 @@ def analyze(
                 "the original-data counts."
             )
         imputed_frame_count = int(imputed_frames_by_animal[individual])
+        remaining_missing_after_social_substitution = (
+            missing_coordinate_frames - imputed_frame_count
+        )
+        if remaining_missing_after_social_substitution < 0:
+            raise AssertionError(
+                "Social-disappearance substitutions exceeded original "
+                "missing-coordinate frames"
+            )
         if imputed_frame_count:
             warnings.append(
                 "SOCIAL_DISAPPEARANCE_IMPUTATION_USED: the visible partner's "
@@ -521,6 +675,19 @@ def analyze(
                 f"Distance excluded {excluded_steps} adjacent-frame pair(s) "
                 "with a missing coordinate at one or both endpoints; remaining "
                 "gaps were not bridged."
+            )
+        turtling_result = turtling_by_animal[individual]
+        turtling_candidate_frames = int(
+            turtling_result["mask"].sum()
+        )
+        turtling_candidate_events = len(turtling_result["events"])
+        if turtling_candidate_frames:
+            warnings.append(
+                "TURTLING_CANDIDATE_ONLY: centroid-path geometry identified "
+                f"{turtling_candidate_frames} candidate frame(s) in "
+                f"{turtling_candidate_events} event(s). Coordinates alone "
+                "cannot confirm that the beetle was physically upside down; "
+                "review the dark-red PDF overlay."
             )
 
         frames_in_wall = ""
@@ -791,9 +958,21 @@ def analyze(
                 "social_disappearance_imputed_frames": (
                     imputed_frame_count if is_fight else ""
                 ),
+                "remaining_missing_coordinate_frames_after_social_substitution": (
+                    remaining_missing_after_social_substitution
+                ),
                 "coordinate_frames_used_in_distance_and_location_calculations": (
                     int(valid.sum())
                 ),
+                "turtling_candidate_frames": turtling_candidate_frames,
+                "turtling_candidate_events": turtling_candidate_events,
+                "turtling_detector_status": turtling_result["status"],
+                "turtling_window_frames": turtling_window_frames,
+                "turtling_min_path_px": turtling_min_path_px,
+                "turtling_max_radius90_px": turtling_max_radius90_px,
+                "turtling_min_turn_rotations": turtling_min_turn_rotations,
+                "turtling_max_straightness": turtling_max_straightness,
+                "turtling_max_step_px": turtling_max_step_px,
                 "baseline_x_px": baseline_x,
                 "baseline_y_px": baseline_y,
                 "valid_coordinate_frames_in_window": int(
@@ -855,6 +1034,24 @@ def write_plot_pdf(
         str(rows[0].get("use_social_disappearance_in_calculations", "NO"))
         == "YES"
     )
+    turtling_by_animal = [
+        compute_turtling_candidates(
+            window_arr[:, animal, :],
+            window_frames=int(rows[animal]["turtling_window_frames"]),
+            min_path_px=float(rows[animal]["turtling_min_path_px"]),
+            max_radius90_px=float(
+                rows[animal]["turtling_max_radius90_px"]
+            ),
+            min_turn_rotations=float(
+                rows[animal]["turtling_min_turn_rotations"]
+            ),
+            max_straightness=float(
+                rows[animal]["turtling_max_straightness"]
+            ),
+            max_step_px=float(rows[animal]["turtling_max_step_px"]),
+        )
+        for animal in range(window_arr.shape[1])
+    ]
     try:
         rois = load_rois(session_folder)
     except Exception:
@@ -928,6 +1125,20 @@ def write_plot_pdf(
                 loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2,
             )
 
+    def draw_turtling_overlay_2d(ax, animal, xy):
+        candidate = xy.copy()
+        candidate[~turtling_by_animal[animal]["mask"]] = np.nan
+        ax.plot(
+            candidate[:, 0],
+            candidate[:, 1],
+            color="#8B0000",
+            linewidth=1.4,
+            linestyle="--",
+            alpha=0.78,
+            label=f"animal {animal} potential turtling",
+            zorder=7,
+        )
+
     destination.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(destination) as pdf:
         fig, ax = plt.subplots(figsize=(8.5, 8.5))
@@ -946,6 +1157,7 @@ def write_plot_pdf(
                 color=colors[animal % len(colors)], linewidth=0.65,
                 alpha=0.8, label=label,
             )
+            draw_turtling_overlay_2d(ax, animal, xy)
             if finite[0]:
                 ax.scatter(
                     xy[0, 0], xy[0, 1], s=55, marker="o",
@@ -979,6 +1191,7 @@ def write_plot_pdf(
                 color=colors[animal % len(colors)], linewidth=0.7,
                 alpha=0.85, label=f"IDtracker animal {animal} track",
             )
+            draw_turtling_overlay_2d(ax, animal, xy)
             if finite[0]:
                 ax.scatter(
                     xy[0, 0], xy[0, 1], s=60, marker="o",
@@ -1018,6 +1231,18 @@ def write_plot_pdf(
                 plotted[:, 0], plotted[:, 1], global_frames,
                 color=colors[(animal - 1) % len(colors)],
                 linewidth=0.7, alpha=0.85,
+            )
+            candidate_mask = turtling_by_animal[animal - 1]["mask"]
+            candidate = xy.copy()
+            candidate[~candidate_mask] = np.nan
+            ax.plot(
+                candidate[:, 0],
+                candidate[:, 1],
+                global_frames,
+                color="#8B0000",
+                linewidth=1.4,
+                linestyle="--",
+                alpha=0.78,
             )
             for roi_index, polygon in enumerate(rois[:2]):
                 closed = np.vstack([polygon, polygon[0]])
@@ -1274,6 +1499,27 @@ def write_plot_pdf(
             f"Displacement threshold: {rows[0]['movement_threshold_px']} pixels",
             f"Trajectory source: {rows[0]['trajectory_source_kind']}",
             f"Primary wall buffer: {rows[0]['wall_buffer_px']} pixels inward",
+            (
+                "Turtling candidate rule: "
+                f"{rows[0]['turtling_window_frames']}-frame window; "
+                f"path >= {rows[0]['turtling_min_path_px']} px; "
+                f"radius90 <= {rows[0]['turtling_max_radius90_px']} px"
+            ),
+            (
+                "  absolute turns >= "
+                f"{rows[0]['turtling_min_turn_rotations']} rotations; "
+                f"net/path <= {rows[0]['turtling_max_straightness']}; "
+                f"max step <= {rows[0]['turtling_max_step_px']} px"
+            ),
+            (
+                "Turtling candidate frames/events by animal: "
+                + "; ".join(
+                    f"{row['idtracker_animal_id']}="
+                    f"{row['turtling_candidate_frames']}/"
+                    f"{row['turtling_candidate_events']}"
+                    for row in rows
+                )
+            ),
         ]
         if is_fight:
             summary_lines.extend(
@@ -1320,6 +1566,7 @@ def write_plot_pdf(
                 ],
                 "",
                 "Social-distance measures are screening summaries, not confirmed fights.",
+                "Dark-red paths are provisional turtling candidates, not posture proof.",
                 "No general interpolation is performed by this prototype.",
                 (
                     "Optional social-disappearance partner-centroid substitution: "
@@ -1357,6 +1604,18 @@ def main() -> int:
             "disappearance frames for distance and wall/fungus calculations."
         ),
     )
+    parser.add_argument("--turtling-window-frames", default=120, type=int)
+    parser.add_argument("--turtling-min-path-px", default=120.0, type=float)
+    parser.add_argument(
+        "--turtling-max-radius90-px", default=35.0, type=float
+    )
+    parser.add_argument(
+        "--turtling-min-turn-rotations", default=3.0, type=float
+    )
+    parser.add_argument(
+        "--turtling-max-straightness", default=0.25, type=float
+    )
+    parser.add_argument("--turtling-max-step-px", default=20.0, type=float)
     parser.add_argument("--analysis-type", default="")
     parser.add_argument("--video", default="")
     parser.add_argument("--cell-label", default="")
@@ -1371,16 +1630,24 @@ def main() -> int:
     args = parser.parse_args()
 
     rows = analyze(
-        Path(args.trajectory),
-        Path(args.session),
-        args.start,
-        args.window,
-        args.threshold,
-        args.wall_buffer_px,
-        args.fungus_buffer_px,
-        args.analysis_type,
-        args.social_distance_threshold_px,
-        args.use_social_disappearance_in_calculations,
+        trajectory_file=Path(args.trajectory),
+        session_folder=Path(args.session),
+        start=args.start,
+        window=args.window,
+        threshold=args.threshold,
+        wall_buffer_px=args.wall_buffer_px,
+        fungus_buffer_px=args.fungus_buffer_px,
+        analysis_type=args.analysis_type,
+        social_distance_threshold_px=args.social_distance_threshold_px,
+        use_social_disappearance_in_calculations=(
+            args.use_social_disappearance_in_calculations
+        ),
+        turtling_window_frames=args.turtling_window_frames,
+        turtling_min_path_px=args.turtling_min_path_px,
+        turtling_max_radius90_px=args.turtling_max_radius90_px,
+        turtling_min_turn_rotations=args.turtling_min_turn_rotations,
+        turtling_max_straightness=args.turtling_max_straightness,
+        turtling_max_step_px=args.turtling_max_step_px,
     )
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)

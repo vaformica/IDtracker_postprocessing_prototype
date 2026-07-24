@@ -4,6 +4,22 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.2.0 - 2026-07-24
+
+- Added the direct
+  `remaining_missing_coordinate_frames_after_social_substitution` audit
+  column.
+- Added `video_year` as the fourth combined-CSV column for recognized 2025 and
+  2026 recording dates, including prefixed legacy video names.
+- Added a GUI-configurable, provisional tight-loop turtling candidate detector
+  for both BA and fight analyses.
+- Added per-animal candidate frame/event counts and complete detector-threshold
+  provenance to the CSV.
+- Added thin, semi-transparent dark-red dashed turtling-candidate paths to the
+  2-D and 3-D PDF plots and documented the rule on the final metadata page.
+- Documented the detector's equations, calibration limitations, missing-data
+  policy, and posture-classification warning.
+
 ## 0.1.1 - 2026-07-24
 
 - Rendered the optional social-disappearance coordinate-substitution equation

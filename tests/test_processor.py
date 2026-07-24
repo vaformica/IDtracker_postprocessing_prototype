@@ -12,6 +12,7 @@ from processor import (
     IDTRACKER_TRAJECTORY_SOURCES,
     analyze,
     compute_social_candidates,
+    compute_turtling_candidates,
     main,
     validate_trajectory_source,
     write_plot_pdf,
@@ -441,6 +442,12 @@ class ProcessorTests(unittest.TestCase):
                 animal_on["missing_coordinate_frames_in_window"], 2
             )
             self.assertEqual(
+                animal_on[
+                    "remaining_missing_coordinate_frames_after_social_substitution"
+                ],
+                0,
+            )
+            self.assertEqual(
                 animal_on["threshold_crossing_global_frame"],
                 animal_off["threshold_crossing_global_frame"],
             )
@@ -539,8 +546,32 @@ class ProcessorTests(unittest.TestCase):
         self.assertEqual(fields["camera"], "1")
         self.assertEqual(fields["camera_id"], "40169154")
         self.assertEqual(fields["recording_date"], "20260702")
+        self.assertEqual(fields["video_year"], "2026")
         self.assertEqual(fields["recording_time"], "1310")
         self.assertEqual(fields["act"], "ACT1")
+
+    def test_video_year_handles_prefixed_2025_video_name(self):
+        fields = parse_video_fields(
+            "/videos/S3_Camera_1_40292452_20250729_2122.mp4"
+        )
+        self.assertEqual(fields["video_year"], "2025")
+        self.assertEqual(fields["recording_date"], "20250729")
+
+    def test_turtling_candidate_requires_tight_repeated_turning(self):
+        angles = np.linspace(0, 12 * np.pi, 150)
+        tight = np.column_stack(
+            [100 + 10 * np.cos(angles), 200 + 10 * np.sin(angles)]
+        )
+        result = compute_turtling_candidates(tight)
+        self.assertGreater(int(result["mask"].sum()), 0)
+        self.assertGreaterEqual(len(result["events"]), 1)
+        self.assertIn("PROVISIONAL", result["status"])
+
+        broad = np.column_stack(
+            [100 + 100 * np.cos(angles), 200 + 100 * np.sin(angles)]
+        )
+        broad_result = compute_turtling_candidates(broad)
+        self.assertEqual(int(broad_result["mask"].sum()), 0)
 
     def test_combined_csv_preserves_rows_and_provenance(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -573,6 +604,7 @@ class ProcessorTests(unittest.TestCase):
                         "analysis_type": "ba",
                         "camera": str(index),
                         "camera_id": f"ID{index}",
+                        "video_year": "2026",
                         "recording_date": "20260724",
                         "recording_time": f"120{index}",
                         "act": f"ACT{index}",
@@ -593,13 +625,14 @@ class ProcessorTests(unittest.TestCase):
             with destination.open(newline="", encoding="utf-8") as stream:
                 reader = csv.DictReader(stream)
                 self.assertEqual(
-                    reader.fieldnames[:3],
-                    ["cell_label", "video", "analysis_type"],
+                    reader.fieldnames[:4],
+                    ["cell_label", "video", "analysis_type", "video_year"],
                 )
                 rows = list(reader)
             self.assertEqual([row["qc_record_id"] for row in rows], ["QC1", "QC2"])
             self.assertEqual(rows[0]["analysis_start_global_frame"], "10")
             self.assertEqual(rows[0]["recording_date"], "20260724")
+            self.assertEqual(rows[0]["video_year"], "2026")
             self.assertEqual(rows[0]["recording_time"], "1201")
             self.assertEqual(
                 rows[0]["processing_created_at"],

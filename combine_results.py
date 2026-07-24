@@ -16,6 +16,7 @@ def main():
         "cell_label",
         "video",
         "analysis_type",
+        "video_year",
     ]
     trailing_fields = [
         "qc_record_id",
@@ -50,6 +51,7 @@ def main():
                         "analysis_type": item["analysis_type"],
                         "camera": item.get("camera", ""),
                         "camera_id": item.get("camera_id", ""),
+                        "video_year": item.get("video_year", ""),
                         "recording_date": item.get("recording_date", ""),
                         "recording_time": item.get("recording_time", ""),
                         "act": item.get("act", ""),

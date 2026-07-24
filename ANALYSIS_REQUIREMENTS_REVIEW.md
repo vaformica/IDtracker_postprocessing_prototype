@@ -13,13 +13,25 @@ that remain ambiguous. Items in the second section are **not implemented**.
   least the threshold `T`, default 30 pixels.
 - Latency in frames: `crossing_global_frame - S`.
 - Missing-coordinate counts and explicit non-result statuses.
+- Original missing frames, social-disappearance substitutions, and remaining
+  unusable coordinate frames are reported separately.
+- A parsed `video_year` column is populated only for recognized 2025 and 2026
+  recording dates.
 - Fight-only social-distance summaries use one GUI threshold, default 60
   pixels. Outputs are frames within range, animal-specific distance moved while
   within range, animal-specific social-disappearance frames, and visible
   together-separate-together return events.
+- Both BA and fight rows include provisional tight-loop turtling candidate
+  frames and contiguous events from the documented sliding-window geometry.
 
 This first-stage threshold is not yet the requested **sustained** displacement
 threshold. A sustained rule needs an approved run-length definition.
+
+The turtling measure is also explicitly provisional. It detects centroid paths
+consistent with sustained tight looping; it cannot establish upside-down body
+posture without video review. Defaults were checked against three boxed
+examples and two unboxed comparisons supplied on 2026-07-24, which is not yet
+a general validation sample.
 
 ## Important corrections and unresolved choices
 

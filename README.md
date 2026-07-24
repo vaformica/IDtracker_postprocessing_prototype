@@ -111,7 +111,8 @@ hidden partial items and promoted only after both downloads finish. The manual
 download buttons remain available.
 
 In the combined CSV, `cell_label`, `video`, and `analysis_type` (fight or BA)
-are deliberately the first three columns.
+are deliberately the first three columns. `video_year` is fourth and is parsed
+from the recording date for recognized 2025 and 2026 video names.
 
 The editable missing-start report is keyed by authoritative `qc_record_id`.
 Import validation is all-or-nothing: duplicate IDs, unknown IDs, non-integers,
@@ -169,7 +170,25 @@ fungus frame/distance calculations, including movement steps entering and
 leaving the substituted run. Latency, social-distance summaries, and original
 valid/missing counts remain based on unmodified IDtracker data. Separate CSV
 columns record the switch state, animal-specific imputed-frame count, and
-effective coordinate frames used in distance/location calculations.
+effective coordinate frames used in distance/location calculations. The direct
+remaining count is also written as
+`remaining_missing_coordinate_frames_after_social_substitution`.
+
+Both BA and fight rows include a provisional tight-loop turtling candidate
+screen. The default 120-frame sliding window requires at least 120 px of path,
+a 90th-percentile radius no larger than 35 px, at least three complete
+rotations of cumulative absolute turning, net displacement/path no larger than
+0.25, and no valid adjacent step over 20 px. At least 95% of coordinates in a
+window must be valid; sub-pixel steps are excluded as jitter. These six editable
+thresholds are shown in the GUI. Candidate frames and contiguous events are
+reported per animal.
+
+This detector is not a posture classifier: centroid geometry cannot prove that
+a beetle is upside down. It was provisionally checked against three boxed
+positive PDFs and two unboxed comparison PDFs supplied on 2026-07-24. More
+positive and negative examples are required before biological inference.
+Potential turtling paths appear as thin semi-transparent dark-red dashed
+overlays so the original track remains visible.
 
 Processing creates one multipage PDF per session under the remote
 `combined_results_latest_pdfs` folder. Every page includes the full video

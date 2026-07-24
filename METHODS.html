@@ -209,6 +209,42 @@ calculations use <strong>p</strong><sup>*</sup>;
 latency, social-event detection, and original missing-data counts continue to
 use <strong>p</strong>. When the switch is off,
 <strong>p</strong><sup>*</sup> = <strong>p</strong> for all frames.</p>
+<p>The direct remaining unusable-coordinate count is</p>
+<p class="formula">remaining missing frames =
+original missing frames − substituted social-disappearance frames.</p>
+
+<h2>Provisional tight-loop turtling candidate detector</h2>
+<div class="warning"><strong>Interpretation safeguard.</strong> IDtracker
+centroids do not show body orientation. This detector can identify trajectory
+segments that resemble sustained flailing in a small area, but it cannot prove
+that a beetle is upside down. Outputs are therefore named
+<em>turtling candidates</em> and require video or PDF review.</div>
+<p>The detector is applied independently to every animal in both BA and fight
+analyses, using only that animal's original IDtracker coordinates. Optional
+social-disappearance substitutions are never used. Every possible consecutive
+window of <em>W</em> frames is evaluated; the default is 120 frames.</p>
+<p>A window qualifies only when all of the following are true:</p>
+<ol>
+<li>at least 95% of its coordinate frames are valid;</li>
+<li>no valid adjacent-frame step exceeds the editable maximum, default 20 px;</li>
+<li>after excluding steps shorter than 1 px as sub-pixel centroid jitter, path
+length is at least the editable minimum, default 120 px;</li>
+<li>the 90th percentile distance from the window's median centroid is between
+5 px and the editable maximum, default 35 px;</li>
+<li>the sum of absolute wrapped heading changes is at least the editable
+minimum, default 3 complete rotations; and</li>
+<li>net displacement divided by path length is at most the editable maximum,
+default 0.25.</li>
+</ol>
+<p>Every valid-coordinate frame belonging to at least one qualifying window is
+marked as a candidate. Missing frames are not marked. A candidate event is one
+contiguous run of marked frames; events are not merged across gaps.</p>
+<p>The defaults were provisionally checked against the five supplied PDFs:
+they identified candidate regions in all three PDFs containing dark-red box
+annotations and produced zero candidate frames in the two supplied unboxed
+comparison PDFs. This is preliminary calibration, not general validation.
+Additional positive and negative examples should be reviewed before using the
+measure for biological inference.</p>
 
 <h2>PDF audit plots</h2>
 <p>Each processed session receives one multipage PDF in
@@ -227,7 +263,9 @@ When substitution is enabled, black x markers identify copied partner
 locations used in calculations. The penultimate page
 is a translucent wall/fungus buffer map. This colored map is a display raster
 only; CSV classification still uses the exact point-to-segment geometry
-described above. The metadata page is deliberately last.</p>
+described above. Potential turtling paths are shown as thin, semi-transparent,
+dark-red dashed overlays so the original track remains visible. The metadata
+page is deliberately last.</p>
 <p>The third axis is global frame, not seconds. Lines break at coordinates that
 remain missing in the selected IDtracker file; the prototype does not
 interpolate them. Primary and fungus ROI outlines, exact analysis starts, and
@@ -285,18 +323,30 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>social_analysis_status</td><td>Explicit calculated/not-applicable/not-calculated interpretation.</td></tr>
 <tr><td>use_social_disappearance_in_calculations</td><td>YES/NO fight switch provenance; default NO.</td></tr>
 <tr><td>social_disappearance_imputed_frames</td><td>Animal-specific number of partner-centroid substitutions used for distance/location calculations.</td></tr>
+<tr><td>remaining_missing_coordinate_frames_after_social_substitution</td><td>Original missing-coordinate frames minus qualifying partner-centroid substitutions; the direct remaining unusable-frame count for distance/location calculations.</td></tr>
 <tr><td>coordinate_frames_used_in_distance_and_location_calculations</td><td>Effective valid-coordinate frame count after any enabled substitutions.</td></tr>
+<tr><td>turtling_candidate_frames</td><td>Valid frames belonging to at least one qualifying tight-loop window; candidate interpretation only.</td></tr>
+<tr><td>turtling_candidate_events</td><td>Contiguous runs of candidate frames; gaps are not merged.</td></tr>
+<tr><td>turtling_detector_status</td><td>Explicit provisional/calculated or not-calculated status.</td></tr>
+<tr><td>turtling_window_frames</td><td>Sliding candidate-window length; default 120 frames.</td></tr>
+<tr><td>turtling_min_path_px</td><td>Minimum within-window path after excluding sub-pixel steps; default 120 px.</td></tr>
+<tr><td>turtling_max_radius90_px</td><td>Maximum 90th-percentile radius from the median centroid; default 35 px.</td></tr>
+<tr><td>turtling_min_turn_rotations</td><td>Minimum cumulative absolute wrapped turning expressed as complete rotations; default 3.</td></tr>
+<tr><td>turtling_max_straightness</td><td>Maximum net displacement/path proportion; default 0.25.</td></tr>
+<tr><td>turtling_max_step_px</td><td>Maximum valid adjacent-frame step allowed in a candidate window; default 20 px.</td></tr>
 <tr><td>baseline_x_px, baseline_y_px</td><td>Unmodified centroid at S.</td></tr>
 <tr><td>valid/missing_coordinate_frames_in_window</td><td>Transparent coordinate completeness counts.</td></tr>
 <tr><td>result_status, warning</td><td>Explicit interpretation or reason no result was produced.</td></tr>
 <tr><td>trajectory_source_kind</td><td>Exact selected IDtracker source category, including explicit raw fallback categories.</td></tr>
 <tr><td>session_folder, trajectory_file</td><td>Provenance.</td></tr>
 </table>
-<p>The combined batch CSV adds camera, camera ID, recording date,
+<p>The combined batch CSV adds camera, camera ID, video year, recording date,
 recording time, ACT, processing batch ID, and an ISO-8601 processing date/time
 alongside video, cell, analysis, QC record, and source-result provenance.
-Its first three columns are <code>cell_label</code>, <code>video</code>, and
-<code>analysis_type</code> (the fight/BA video type).</p>
+Its first four columns are <code>cell_label</code>, <code>video</code>,
+<code>analysis_type</code> (the fight/BA video type), and
+<code>video_year</code>. The year is parsed from the eight-digit recording
+date and is currently populated only for recognized 2025 or 2026 names.</p>
 
 <h2>Automatic Mac output copies</h2>
 <p>After a complete remote batch is promoted, the GUI automatically downloads
@@ -432,5 +482,28 @@ at frame <em>b</em>+1 ≤ <em>E</em>.</p>
 frames and that run includes at least one frame <em>g</em> where both animals
 are valid and <em>q</em><sub>g</sub> &gt; 60. This enforces the requested
 together, visibly separate, then together-again sequence.</p>
+
+<h3>Tight-loop turtling candidate geometry</h3>
+<p>For an evaluated window, let <em>d</em><sub>k</sub> be each valid
+adjacent-frame step length. Steps below 1 px are excluded as sub-pixel jitter.
+The path is</p>
+<p class="formula">L = Σ d<sub>k</sub>.</p>
+<p>Let <strong>m</strong> be the component-wise median centroid of valid
+coordinates in the window. The confinement statistic is</p>
+<p class="formula">R<sub>90</sub> =
+90th percentile of ||<strong>p</strong><sub>f</sub> −
+<strong>m</strong>||.</p>
+<p>For consecutive retained step vectors, heading
+θ<sub>k</sub> = atan2(Δy<sub>k</sub>, Δx<sub>k</sub>). Each heading change is
+wrapped into [−π, π], and cumulative absolute turning in rotations is</p>
+<p class="formula">C = Σ |wrap(θ<sub>k+1</sub> − θ<sub>k</sub>)| / (2π).</p>
+<p>Straightness is net displacement divided by path:</p>
+<p class="formula">Q =
+||<strong>p</strong><sub>last</sub> −
+<strong>p</strong><sub>first</sub>|| / L.</p>
+<p>The default qualifying inequalities are
+<em>L</em> ≥ 120 px, 5 px ≤ <em>R</em><sub>90</sub> ≤ 35 px,
+<em>C</em> ≥ 3 rotations, and <em>Q</em> ≤ 0.25, together with the validity and
+maximum-step safeguards described above.</p>
 </body>
 </html>

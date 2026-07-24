@@ -14,6 +14,8 @@ This repository is the standalone IDtracker post-processing prototype.
 - `v0.1.0` preserves the initial tested standalone snapshot.
 - `v0.1.1` adds offline-readable mathematical notation and establishes the
   explicit standalone version/changelog files.
+- `v0.2.0` adds explicit remaining-missing and video-year columns plus the
+  provisional, review-required tight-loop turtling candidate detector.
 
-The automated suite contains 26 tests. Firebird execution remains a separate
+The automated suite contains 28 tests. Firebird execution remains a separate
 validation step and is not implied by local test success.

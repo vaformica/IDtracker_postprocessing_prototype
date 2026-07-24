@@ -196,18 +196,25 @@ def normalized_video_name(path: str) -> str:
 
 def parse_video_fields(path: str) -> dict:
     stem = normalized_video_name(path)
-    match = re.match(
-        r"^Camera_(?P<camera>\d+)_(?P<camera_id>\d+)_"
+    match = re.search(
+        r"(?:^|_)Camera_(?P<camera>\d+)_(?P<camera_id>\d+)_"
         r"(?P<date>\d{8})_(?P<time>\d{4})(?P<remainder>.*)$",
         stem,
         flags=re.IGNORECASE,
     )
     act_match = re.search(r"(ACT\d+)", stem, flags=re.IGNORECASE)
+    recording_date = match.group("date") if match else ""
+    video_year = (
+        recording_date[:4]
+        if recording_date[:4] in {"2025", "2026"}
+        else ""
+    )
     return {
         "video_name": stem,
         "camera": match.group("camera") if match else "",
         "camera_id": match.group("camera_id") if match else "",
-        "recording_date": match.group("date") if match else "",
+        "video_year": video_year,
+        "recording_date": recording_date,
         "recording_time": match.group("time") if match else "",
         "act": act_match.group(1).upper() if act_match else "",
     }
@@ -222,6 +229,7 @@ START_REPORT_FIELDS = [
     "video",
     "camera",
     "camera_id",
+    "video_year",
     "recording_date",
     "recording_time",
     "act",
@@ -261,6 +269,7 @@ def make_missing_start_report(records):
             "video": record["video"],
             "camera": record["camera"],
             "camera_id": record["camera_id"],
+            "video_year": record.get("video_year", ""),
             "recording_date": record["recording_date"],
             "recording_time": record["recording_time"],
             "act": record["act"],
@@ -284,6 +293,7 @@ def make_missing_trajectory_report(records):
             "qc_record_id": record["qc_record_id"],
             "video": record["video"],
             "camera": record["camera"],
+            "video_year": record.get("video_year", ""),
             "recording_date": record["recording_date"],
             "recording_time": record["recording_time"],
             "act": record["act"],
@@ -571,9 +581,49 @@ class App(tk.Tk):
             row=3, column=2, columnspan=2, sticky="w", padx=8, pady=(6, 8)
         )
 
+        turtling_controls = ttk.LabelFrame(
+            self.setup_tab,
+            text="3. Provisional tight-loop turtling candidate detector",
+        )
+        turtling_controls.pack(fill="x", padx=10, pady=4)
+        self.turtling_window = tk.StringVar(value="120")
+        self.turtling_min_path = tk.StringVar(value="120")
+        self.turtling_max_radius90 = tk.StringVar(value="35")
+        self.turtling_min_turns = tk.StringVar(value="3")
+        self.turtling_max_straightness = tk.StringVar(value="0.25")
+        self.turtling_max_step = tk.StringVar(value="20")
+        turtling_fields = [
+            (0, 0, "Window (frames)", self.turtling_window),
+            (0, 2, "Minimum path (pixels)", self.turtling_min_path),
+            (0, 4, "Maximum radius90 (pixels)", self.turtling_max_radius90),
+            (1, 0, "Minimum absolute turns (rotations)", self.turtling_min_turns),
+            (1, 2, "Maximum net/path (proportion)", self.turtling_max_straightness),
+            (1, 4, "Maximum adjacent step (pixels)", self.turtling_max_step),
+        ]
+        for row, column, label, variable in turtling_fields:
+            ttk.Label(turtling_controls, text=label).grid(
+                row=row, column=column, sticky="w", padx=(8, 4), pady=4
+            )
+            ttk.Entry(
+                turtling_controls, textvariable=variable, width=9
+            ).grid(
+                row=row, column=column + 1,
+                sticky="w", padx=(0, 16), pady=4,
+            )
+        ttk.Label(
+            turtling_controls,
+            text=(
+                "Dark-red PDF paths are trajectory candidates only; centroid "
+                "coordinates cannot prove that a beetle is upside down."
+            ),
+        ).grid(
+            row=2, column=0, columnspan=6,
+            sticky="w", padx=8, pady=(2, 7),
+        )
+
         results = ttk.LabelFrame(
             self.setup_tab,
-            text="3. Results from the latest completed processing run",
+            text="4. Results from the latest completed processing run",
         )
         results.pack(fill="x", padx=10, pady=4)
         self.results_status = tk.StringVar(
@@ -693,7 +743,7 @@ class App(tk.Tk):
 
         columns = (
             "use", "trajectory_status", "status", "start", "video_name", "camera",
-            "recording_date", "recording_time", "act", "cell_label",
+            "video_year", "recording_date", "recording_time", "act", "cell_label",
             "analysis", "run_timestamp", "qc_record_id",
         )
         self.table = ttk.Treeview(sessions_tab, columns=columns, show="headings", selectmode="extended")
@@ -704,6 +754,7 @@ class App(tk.Tk):
             "start": "Global start",
             "video_name": "Video",
             "camera": "Camera",
+            "video_year": "Year",
             "recording_date": "Date",
             "recording_time": "Time",
             "act": "ACT",
@@ -715,7 +766,8 @@ class App(tk.Tk):
         widths = {
             "use": 70, "trajectory_status": 225, "status": 205,
             "start": 100, "video_name": 330,
-            "camera": 70, "recording_date": 95, "recording_time": 70,
+            "camera": 70, "video_year": 65,
+            "recording_date": 95, "recording_time": 70,
             "act": 70, "cell_label": 70, "analysis": 75,
             "run_timestamp": 150, "qc_record_id": 280,
         }
@@ -1122,6 +1174,12 @@ class App(tk.Tk):
                     approved = ""
                     status = "KNOWN MANUAL START REVIEW — entry required"
                 video_fields = parse_video_fields(candidate["video"])
+                if not video_fields["video_year"]:
+                    self.log(
+                        "WARNING: video_year left blank because no recognized "
+                        "2025 or 2026 recording date could be parsed from "
+                        f"{candidate['video']}"
+                    )
                 records.append(
                     {"session": session, "trajectory": trajectory, "detected": detected,
                      "source": source, "start": approved, "status": status, "use": "No",
@@ -1406,7 +1464,8 @@ class App(tk.Tk):
             searchable = " ".join(
                 str(record.get(key, ""))
                 for key in (
-                    "video_name", "camera", "camera_id", "recording_date",
+                    "video_name", "camera", "camera_id", "video_year",
+                    "recording_date",
                     "recording_time", "act", "cell_label", "analysis",
                     "trajectory_status", "status", "qc_record_id",
                 )
@@ -1431,7 +1490,8 @@ class App(tk.Tk):
     def _sort_value(self, record):
         value = record.get(self.sort_column, "")
         if self.sort_column in {
-            "start", "camera", "recording_date", "recording_time"
+            "start", "camera", "video_year", "recording_date",
+            "recording_time"
         }:
             try:
                 return (0, int(value))
@@ -1450,7 +1510,7 @@ class App(tk.Tk):
         )
         value_keys = (
             "use", "trajectory_status", "status", "start", "video_name", "camera",
-            "recording_date", "recording_time", "act", "cell_label",
+            "video_year", "recording_date", "recording_time", "act", "cell_label",
             "analysis", "run_timestamp", "qc_record_id",
         )
         for record in ordered:
@@ -1748,12 +1808,28 @@ class App(tk.Tk):
             use_social_disappearance = bool(
                 self.use_social_disappearance.get()
             )
+            turtling_window = int(self.turtling_window.get())
+            turtling_min_path = float(self.turtling_min_path.get())
+            turtling_max_radius90 = float(
+                self.turtling_max_radius90.get()
+            )
+            turtling_min_turns = float(self.turtling_min_turns.get())
+            turtling_max_straightness = float(
+                self.turtling_max_straightness.get()
+            )
+            turtling_max_step = float(self.turtling_max_step.get())
             if (
                 window <= 0
                 or threshold <= 0
                 or wall_buffer < 0
                 or fungus_buffer < 0
                 or social_distance <= 0
+                or turtling_window < 3
+                or turtling_min_path <= 0
+                or turtling_max_radius90 < 5
+                or turtling_min_turns <= 0
+                or not 0 <= turtling_max_straightness <= 1
+                or turtling_max_step <= 0
             ):
                 raise ValueError
             for record in chosen:
@@ -1764,7 +1840,9 @@ class App(tk.Tk):
                 "Invalid review values",
                 "Every checked row needs a positive approved start, window, wake "
                 "threshold. ROI buffer widths cannot be negative. Social "
-                "distance threshold must be positive.",
+                "distance threshold must be positive. Turtling settings require "
+                "a window of at least 3 frames, radius90 of at least 5 pixels, "
+                "positive path/turn/step thresholds, and net/path from 0 to 1.",
             )
             return
         skip_message = (
@@ -1781,6 +1859,12 @@ class App(tk.Tk):
             f"Fight social distance: {social_distance:g} pixels\n"
             f"Use social disappearance in distance/location calculations: "
             f"{'YES' if use_social_disappearance else 'NO'}\n"
+            f"Turtling candidate rule: {turtling_window} frames, "
+            f"path >= {turtling_min_path:g} px, "
+            f"radius90 <= {turtling_max_radius90:g} px, "
+            f"turns >= {turtling_min_turns:g} rotations, "
+            f"net/path <= {turtling_max_straightness:g}, "
+            f"maximum step <= {turtling_max_step:g} px\n"
             + skip_message
             +
             "The best available IDtracker trajectory is used: validated and "
@@ -1814,7 +1898,13 @@ class App(tk.Tk):
                 f"fungus buffer={fungus_buffer:g} px, "
                 f"social distance={social_distance:g} px, "
                 f"social disappearance calculation switch="
-                f"{'ON' if use_social_disappearance else 'OFF'}."
+                f"{'ON' if use_social_disappearance else 'OFF'}, "
+                f"turtling window={turtling_window} frames, "
+                f"min path={turtling_min_path:g} px, "
+                f"max radius90={turtling_max_radius90:g} px, "
+                f"min turns={turtling_min_turns:g}, "
+                f"max net/path={turtling_max_straightness:g}, "
+                f"max step={turtling_max_step:g} px."
             )
             for record in blocked:
                 self.log(
@@ -1879,6 +1969,16 @@ class App(tk.Tk):
                         "--fungus-buffer-px", str(fungus_buffer),
                         "--social-distance-threshold-px",
                         str(social_distance),
+                        "--turtling-window-frames", str(turtling_window),
+                        "--turtling-min-path-px", str(turtling_min_path),
+                        "--turtling-max-radius90-px",
+                        str(turtling_max_radius90),
+                        "--turtling-min-turn-rotations",
+                        str(turtling_min_turns),
+                        "--turtling-max-straightness",
+                        str(turtling_max_straightness),
+                        "--turtling-max-step-px",
+                        str(turtling_max_step),
                         "--analysis-type", shlex.quote(record["analysis"]),
                         "--video", shlex.quote(record["video"]),
                         "--cell-label", shlex.quote(record["cell_label"]),
@@ -1908,6 +2008,7 @@ class App(tk.Tk):
                         "analysis_type": record["analysis"],
                         "camera": record["camera"],
                         "camera_id": record["camera_id"],
+                        "video_year": record["video_year"],
                         "recording_date": record["recording_date"],
                         "recording_time": record["recording_time"],
                         "act": record["act"],
