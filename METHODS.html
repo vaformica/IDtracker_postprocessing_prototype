@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>IDtracker post-processing v1 — methods and safeguards</title>
+<style>
+body{font:17px/1.55 system-ui,sans-serif;max-width:980px;margin:40px auto;padding:0 24px;color:#17202a}
+h1,h2{line-height:1.2} code{background:#eef2f5;padding:.1em .3em}
+.warning{border-left:6px solid #b42318;background:#fff1f0;padding:14px 18px}
+.note{border-left:6px solid #175cd3;background:#eff8ff;padding:14px 18px}
+table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8px;text-align:left}
+</style>
+</head>
+<body>
+<h1>Minimal IDtracker.ai post-processing: version 1</h1>
+<p>This document describes every calculation performed by <code>processor.py</code>.
+The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
+
+<div class="warning"><strong>Scientific safeguard.</strong> A missing interval or an interval
+starting at global frame 0 is not repaired automatically. The GUI requires a positive,
+researcher-approved global entry frame before processing. No coordinates are interpolated,
+smoothed, or carried forward by this prototype. The only optional coordinate
+replacement is the explicitly enabled social-disappearance substitution documented
+below. Validated and without-gaps IDtracker files are preferred; a clearly labeled
+raw IDtracker fallback is used when they are absent.</div>
+
+<h2>Analysis window and frame convention</h2>
+<p>The analysis begins at the researcher-approved global entry frame. The requested
+timespan, which defaults to 7200 frames, is added to that start to obtain the
+inclusive global end frame. Both the start and end frames are analyzed.</p>
+<p>For example, a start frame of 62 and a requested timespan of 7200 produce an
+inclusive end frame of 7262. This represents 7200 intervals between frames and
+7201 frame observations. The mathematical notation for this convention is
+collected in the appendix at the end of this document.</p>
+
+<h2>Approved-run and repeated-cell selection</h2>
+<p>The GUI reads the pipeline's authoritative
+<code>QC/run_status.csv</code>. A run is eligible only when
+<code>qc_decision</code> is <code>APPROVED</code> or legacy <code>DONE</code>.
+Folder names, TOML locations, successful completion, and modification times are
+not interpreted as approval.</p>
+<p>Eligible repeats are grouped by the exact triple
+<code>(video, cell, analysis)</code>. The record with the greatest ISO-like
+<code>date_run</code> is retained. If dates tie, the greater
+<code>run_index</code> is retained; the metadata path is the final deterministic
+tie-breaker. The QC record ID, selected run, and source TOML provenance are
+displayed in the GUI.</p>
+
+<h2>IDtracker trajectory-source priority</h2>
+<p>The prototype first prefers IDtracker-produced gap-filled files, then uses a
+raw IDtracker fallback when no gap-filled file exists. The exact priority is:</p>
+<ol>
+<li><code>validated.npy</code>;</li>
+<li><code>without_gaps.npy</code>;</li>
+<li><code>trajectories_wo_gaps.npy</code> (recognized legacy name);</li>
+<li><code>trajectories_without_gaps.npy</code> (recognized legacy name);</li>
+<li><code>trajectories.npy</code> (raw NPY fallback);</li>
+<li><code>trajectories.h5</code> (raw HDF5 fallback);</li>
+<li><code>trajectories.csv</code> (raw CSV fallback).</li>
+</ol>
+<p>The selected category is shown in the GUI and written to
+<code>trajectory_source_kind</code>. A session is skipped only when no
+recognized source of any supported type exists or the highest-priority choice
+is ambiguous.</p>
+<p>The prototype performs no additional interpolation. Any coordinates that
+remain missing in the selected file are counted in the CSV and stated
+explicitly in the warning column. A raw fallback adds the explicit
+<code>RAW_IDTRACKER_INPUT</code> warning. Missing coordinates are not filled,
+and movement gaps are not bridged.</p>
+
+<h2>Latency to the displacement threshold</h2>
+<p>For each individual, the unmodified IDtracker centroid at the exact entry frame is
+the baseline point. At every global frame in the analysis window, the script
+calculates straight-line displacement from that fixed baseline.</p>
+<p>The reported threshold crossing is the first global frame at which this
+displacement is equal to or greater than the selected threshold, which defaults
+to 30 pixels. Latency is the crossing frame minus the analysis start frame. This
+is net Euclidean displacement from the entry position; it is
+<strong>not</strong> cumulative path length and does not use speed, seconds, or a sustained-run rule.</p>
+
+<h2>IDtracker animal identity and fight starting side</h2>
+<p><code>idtracker_animal_id</code> is the zero-based position on the
+individual axis of the IDtracker trajectory array. Its values are exactly
+IDtracker animal 0, animal 1, and so on; this is not a newly inferred
+biological identity.</p>
+<p>For a fight containing exactly two animals, <code>starting_side</code> uses
+the unmodified x coordinates at the exact approved analysis start frame. The
+animal with the smaller x coordinate is <code>LEFT</code> and the other is
+<code>RIGHT</code>. No later frame or average is substituted. Missing start
+coordinates, equal x coordinates, or an unexpected animal count produce an
+explicit <code>UNASSIGNED_...</code> value. Non-fight rows contain
+<code>NOT_APPLICABLE_NOT_FIGHT</code>.</p>
+
+<h2>Total distance traveled inside the analysis window</h2>
+<p>For every pair of consecutive global frames, the script calculates the
+straight-line distance between the two centroid positions. The column
+<code>total_distance_px_in_analysis_window</code> is the sum of these step
+distances from the inclusive start through the inclusive end. A step is included
+only when both x and y are finite at both endpoints. Missing gaps are not
+interpolated and the locations on opposite sides of a gap are not joined. The
+warning column reports exactly how many adjacent-frame pairs were excluded.</p>
+<p><strong>Why pixel distances contain decimals:</strong> a straight-line move
+across both the horizontal and vertical axes is usually not a whole number of
+pixels. For example, moving one pixel horizontally and one pixel vertically has
+a straight-line length of approximately 1.414 pixels. IDtracker centroid
+coordinates may also have subpixel decimal precision. The processor therefore
+retains the full floating-point distance in calculations and CSV output.
+Rounding would discard measurement precision and must be used only for optional
+display, never before distances are summed or analyzed.</p>
+
+<h2>Primary-ROI wall buffer</h2>
+<p>The primary arena is <code>roi_list[0]</code> from the canonical
+<code>session.json</code>. The wall buffer is the portion inside that polygon
+whose shortest Euclidean distance to any polygon edge is at most the GUI-entered
+buffer width (default 30 pixels). A valid position farther inward is outside the
+wall buffer.</p>
+<p>Frame classifications use the centroid at the frame. Distance
+classifications use the midpoint of each valid movement segment.
+This assigns every ROI-contained segment wholly to either the wall buffer or
+the interior while preserving its complete length.</p>
+<p>The processor checks both identities:</p>
+<ul>
+<li>wall-buffer frames + interior frames = valid coordinate frames;</li>
+<li>wall-buffer distance + interior distance = total distance.</li>
+</ul>
+<p><code>spatial_partition_status</code> is <code>PASS</code> only when both
+hold. A valid centroid or segment midpoint outside the primary ROI causes
+<code>FAIL_OUTSIDE_PRIMARY_ROI</code>; exact unclassified frame and distance
+amounts are then written in the warning rather than silently assigned to the
+interior.</p>
+
+<h2>Fight-only fungus ROI and inward edge buffer</h2>
+<p>Only records explicitly identified as fights are eligible. The fungus is
+<code>roi_list[1]</code> from the canonical <code>session.json</code>. No
+second ROI is inferred for BA records. A fight missing this ROI receives
+<code>NOT_CALCULATED_NO_SECONDARY_ROI</code> and a warning.</p>
+<p>A valid centroid is on fungus when it is inside or on the boundary of the
+secondary polygon. Within that polygon, the inward fungus edge buffer contains
+points whose shortest Euclidean distance to the polygon edge is at most the
+GUI-entered width (default 30 pixels). Remaining fungus points are the fungus
+interior. Movement distance on fungus is classified by the midpoint of each
+valid adjacent-frame segment, exactly as for the primary ROI.</p>
+<p>The processor verifies both identities:</p>
+<ul>
+<li>fungus edge-buffer frames + fungus-interior frames = frames on fungus;</li>
+<li>fungus edge-buffer distance + fungus-interior distance = distance on fungus.</li>
+</ul>
+
+<h2>Fight-only social distance, movement, and disappearance</h2>
+<p>These are screening summaries, not confirmed fight labels. They are
+calculated only when a fight trajectory has exactly two IDtracker animals. One
+editable <code>social_distance_threshold_px</code> defaults to 60 pixels.</p>
+<p>A <strong>within-social-distance frame</strong> requires valid coordinates
+for both animals and a Euclidean centroid-to-centroid distance less than or
+equal to 60 pixels. <code>frames_within_social_distance</code> counts these
+frames.</p>
+<p>For each animal,
+<code>distance_moved_px_while_within_social_distance</code> sums its
+adjacent-frame Euclidean movement only when both endpoint frames have both
+animals visible and within the social distance. A transition into or out of
+range is not included in this subtotal.</p>
+<p>A <strong>social disappearance run</strong> is a contiguous run in which
+one specific animal has a missing centroid and the other animal remains
+visible. It is counted only if:</p>
+<ol>
+<li>the run does not start at the first analysis frame;</li>
+<li>the immediately preceding frame was within the single 60-pixel social
+distance; and</li>
+<li>the same missing animal reappears with both animals visible before the
+inclusive analysis window ends.</li>
+</ol>
+<p><code>social_disappearance_frames</code> is animal-specific: each output
+row counts only qualifying frames when that row's IDtracker animal is missing.</p>
+<p><code>social_return_interaction_events</code> requires a stricter visible
+sequence: together within 60 pixels, then at least one frame with both animals
+visible and farther than 60 pixels, then together within 60 pixels again.
+A missing-only gap is not evidence of separation and cannot create a return
+event.</p>
+<h3>Optional social-disappearance substitution</h3>
+<p>The GUI checkbox <strong>Use social disappearance in distance/location
+calculations</strong> defaults to off. When it is on, the visible partner's
+centroid is copied to the missing animal at each qualifying
+social-disappearance frame. The substituted series is used for:</p>
+<ul>
+<li><code>total_distance_px_in_analysis_window</code>, including valid steps
+entering, within, and leaving the substituted run;</li>
+<li>primary-ROI wall-buffer frame and distance calculations; and</li>
+<li>fight fungus frame and distance calculations.</li>
+</ul>
+<p>The switch does not change latency, starting side,
+<code>frames_within_social_distance</code>, social return-event detection, or
+the original valid/missing-coordinate counts.</p>
+<div class="warning"><strong>Scientific interpretation.</strong> This is a
+user-selected assumption that the missing beetle occupies the visible partner's
+centroid during a qualifying overlap. It can create substantial entry and exit
+movement steps. The CSV and PDF explicitly identify whether it was used and
+how many frames were substituted for each animal.</div>
+<p>In mathematical notation, let \(\mathbf{p}_{i,f}\) be the original
+IDtracker coordinate for animal \(i\) at frame \(f\), and let \(j\) be the
+visible partner. For a qualifying social-disappearance frame, the effective
+coordinate used by the enabled calculation switch is</p>
+<p class="formula">\[
+\mathbf{p}^{*}_{i,f} = \mathbf{p}_{j,f}.
+\]</p>
+<p>At every other frame, \(\mathbf{p}^{*}_{i,f}=\mathbf{p}_{i,f}\). Total
+distance and wall/fungus location calculations use \(\mathbf{p}^{*}\);
+latency, social-event detection, and original missing-data counts continue to
+use \(\mathbf{p}\). When the switch is off, \(\mathbf{p}^{*}=\mathbf{p}\)
+for all frames.</p>
+
+<h2>PDF audit plots</h2>
+<p>Each processed session receives one multipage PDF in
+<code>combined_results_latest_pdfs</code>. Every page prominently identifies the full
+source video filename and cell; PDF creation stops if either is absent. The QC
+record ID is also printed when available.</p>
+<p>The PDF folder and combined CSV are staged and promoted only after the
+entire selected batch finishes. A failed or incomplete batch cannot replace the
+previous complete downloadable batch.</p>
+<p>The PDF begins with a combined two-dimensional track map, followed by one
+two-dimensional page per IDtracker animal and a redesigned three-dimensional
+page with separate animal panels. Fight PDFs then include a social-distance
+page: red line segments mark frames within the selected distance and purple
+line segments mark the visible animal during a qualifying disappearance run.
+When substitution is enabled, black x markers identify copied partner
+locations used in calculations. The penultimate page
+is a translucent wall/fungus buffer map. This colored map is a display raster
+only; CSV classification still uses the exact point-to-segment geometry
+described above. The metadata page is deliberately last.</p>
+<p>The third axis is global frame, not seconds. Lines break at coordinates that
+remain missing in the selected IDtracker file; the prototype does not
+interpolate them. Primary and fungus ROI outlines, exact analysis starts, and
+threshold-crossing positions are displayed where available.</p>
+
+<h2>Missing data and failure behavior</h2>
+<ul>
+<li>If x or y is missing at the approved analysis start frame, latency is not
+calculated. A later coordinate is never substituted as the baseline.</li>
+<li>A coordinate that is missing in the selected IDtracker file cannot
+cross the threshold and is skipped without additional interpolation.</li>
+<li>If no valid point reaches the threshold, status is <code>THRESHOLD_NOT_REACHED</code>;
+this is distinct from a calculation failure.</li>
+<li>If the inclusive analysis end frame exceeds the trajectory array length,
+the session stops with an error. The script does not guess that a shorter array
+is interval-relative.</li>
+<li>Output is first written to a <code>.partial</code> file and renamed only after the
+complete CSV is written.</li>
+</ul>
+<p>During the current prototype phase, the canonical per-session file is
+<code>processed_result_latest.csv</code> and the canonical batch
+file is <code>combined_results_latest.csv</code>. These names allow a batch to
+contain clearly labeled gap-filled and raw-fallback sources. Replacement is atomic: the prior
+complete file remains intact unless the entire new CSV is written, flushed, and
+successfully renamed. A failed run cannot replace it with partial data.</p>
+
+<h2>Output columns</h2>
+<table>
+<tr><th>Column</th><th>Meaning</th></tr>
+<tr><td>analysis_start_global_frame</td><td>Researcher-approved global start; deliberately first.</td></tr>
+<tr><td>analysis_timespan_frames</td><td>Requested difference between the inclusive end and start; default 7200.</td></tr>
+<tr><td>analysis_end_global_frame_inclusive</td><td>Start plus requested timespan; example 7262.</td></tr>
+<tr><td>analysis_frame_observations_inclusive</td><td>Number of included frame observations, equal to timespan + 1; default 7201.</td></tr>
+<tr><td>movement_threshold_px</td><td>Selected displacement threshold in pixels.</td></tr>
+<tr><td>idtracker_animal_id</td><td>Zero-based IDtracker trajectory-array animal identity.</td></tr>
+<tr><td>starting_side</td><td>Fight-only LEFT/RIGHT assignment from x at the exact analysis start, or an explicit unassigned/not-applicable status.</td></tr>
+<tr><td>threshold_crossing_global_frame</td><td>First global frame whose displacement reaches or exceeds the threshold.</td></tr>
+<tr><td>latency_to_threshold_frames</td><td>Crossing frame minus the analysis start frame.</td></tr>
+<tr><td>total_distance_px_in_analysis_window</td><td>Sum of valid consecutive-frame Euclidean steps within S through E only.</td></tr>
+<tr><td>wall_buffer_px</td><td>Inward primary-ROI wall-buffer width.</td></tr>
+<tr><td>frames_inside/outside_wall_buffer</td><td>Valid centroid frames partitioned by the primary-ROI buffer.</td></tr>
+<tr><td>distance_px_inside/outside_wall_buffer</td><td>Valid step distances partitioned using segment midpoints.</td></tr>
+<tr><td>spatial_partition_status</td><td>Additivity result for frames and distance.</td></tr>
+<tr><td>fungus_buffer_px</td><td>Fight-only inward edge-buffer width for roi_list[1].</td></tr>
+<tr><td>frames_on_fungus</td><td>Valid centroid frames inside or on the secondary ROI.</td></tr>
+<tr><td>frames_in_fungus_edge_buffer/interior</td><td>Frames on fungus partitioned by distance from the secondary-ROI edge.</td></tr>
+<tr><td>distance_px_on_fungus</td><td>Valid adjacent-frame distance whose segment midpoint is on fungus.</td></tr>
+<tr><td>distance_px_in_fungus_edge_buffer/interior</td><td>Fungus distance partitioned by midpoint distance from the edge.</td></tr>
+<tr><td>fungus_partition_status</td><td>Fight-only fungus additivity check or an explicit not-calculated/not-applicable status.</td></tr>
+<tr><td>social_distance_threshold_px</td><td>Single fight-only centroid-distance threshold; default 60 pixels.</td></tr>
+<tr><td>frames_within_social_distance</td><td>Frames with both animals visible and separated by at most the threshold.</td></tr>
+<tr><td>distance_moved_px_while_within_social_distance</td><td>Animal-specific movement distance for valid adjacent steps whose two endpoint frames are both within range.</td></tr>
+<tr><td>social_disappearance_frames</td><td>Animal-specific missing frames in runs satisfying the preceding-within-range and within-window reappearance rules.</td></tr>
+<tr><td>social_return_interaction_events</td><td>Count of within-range, visibly separated, then within-range-again sequences. Missing-only gaps do not count.</td></tr>
+<tr><td>social_analysis_status</td><td>Explicit calculated/not-applicable/not-calculated interpretation.</td></tr>
+<tr><td>use_social_disappearance_in_calculations</td><td>YES/NO fight switch provenance; default NO.</td></tr>
+<tr><td>social_disappearance_imputed_frames</td><td>Animal-specific number of partner-centroid substitutions used for distance/location calculations.</td></tr>
+<tr><td>coordinate_frames_used_in_distance_and_location_calculations</td><td>Effective valid-coordinate frame count after any enabled substitutions.</td></tr>
+<tr><td>baseline_x_px, baseline_y_px</td><td>Unmodified centroid at S.</td></tr>
+<tr><td>valid/missing_coordinate_frames_in_window</td><td>Transparent coordinate completeness counts.</td></tr>
+<tr><td>result_status, warning</td><td>Explicit interpretation or reason no result was produced.</td></tr>
+<tr><td>trajectory_source_kind</td><td>Exact selected IDtracker source category, including explicit raw fallback categories.</td></tr>
+<tr><td>session_folder, trajectory_file</td><td>Provenance.</td></tr>
+</table>
+<p>The combined batch CSV adds camera, camera ID, recording date,
+recording time, ACT, processing batch ID, and an ISO-8601 processing date/time
+alongside video, cell, analysis, QC record, and source-result provenance.
+Its first three columns are <code>cell_label</code>, <code>video</code>, and
+<code>analysis_type</code> (the fight/BA video type).</p>
+
+<h2>Automatic Mac output copies</h2>
+<p>After a complete remote batch is promoted, the GUI automatically downloads
+the matching CSV and PDF folder to
+<code>~/Downloads/IDtracker_postprocessing_results</code>. Both names contain
+the same processing timestamp. Downloads are first staged with hidden
+<code>.partial</code> names; neither becomes the final timestamped item until
+both transfers finish.</p>
+
+<h2>GUI start-review statuses</h2>
+<table>
+<tr><th>Status</th><th>Meaning</th></tr>
+<tr><td>REVIEW DETECTED START</td><td>Exactly one positive interval start was detected. It is shown for review but was not manually entered.</td></tr>
+<tr><td>START_ZERO — correction required</td><td>The recorded start is zero, which this project treats as a data-entry error. Processing is blocked until corrected.</td></tr>
+<tr><td>NO INTERVAL — entry required</td><td>No recognized interval start was found in the source TOML or session JSON.</td></tr>
+<tr><td>AMBIGUOUS — entry required</td><td>Recognized sources contain conflicting start values. The GUI does not choose between them.</td></tr>
+<tr><td>KNOWN MANUAL START REVIEW — entry required</td><td>The video is on the collaborator-supplied manual-review list. A detected value is never accepted automatically.</td></tr>
+<tr><td>START MANUALLY APPROVED</td><td>A positive global start was entered directly or imported from the editable missing-start CSV.</td></tr>
+</table>
+
+<div class="note"><strong>Deliberate limitation.</strong> The first validation round should use
+a few known sessions. A human should compare the reported baseline and crossing frame with the
+video/IDtracker output before this processor is incorporated into the QC pipeline.</div>
+
+<h2>Mathematical appendix</h2>
+<p>This appendix collects the mathematical notation used by the processor. In
+the definitions below, <em>i</em> identifies an individual, <em>f</em> is a
+global frame, <em>S</em> is the approved global start frame, <em>W</em> is the
+requested frame timespan, <em>E</em> is the inclusive global end frame, and
+<em>T</em> is the displacement threshold in pixels.</p>
+
+<h3>Inclusive analysis window</h3>
+<p style="text-align:center;font-size:1.2em">
+<em>E</em> = <em>S</em> + <em>W</em>
+</p>
+<p style="text-align:center;font-size:1.2em">
+f ∈ {<em>S</em>, <em>S</em>+1, …, <em>E</em>}
+</p>
+<p>The number of frame intervals is <em>E−S=W</em>, while the number of frame
+observations, because both endpoints are included, is <em>W+1</em>.</p>
+
+<h3>Displacement from the entry position and latency</h3>
+<p style="text-align:center;font-size:1.2em">
+d<sub>i,f</sub> =
+√[(x<sub>i,f</sub>−x<sub>i,S</sub>)² +
+(y<sub>i,f</sub>−y<sub>i,S</sub>)²]
+</p>
+<p style="text-align:center;font-size:1.2em">
+C<sub>i</sub> = min { f ∈ [<em>S</em>, <em>E</em>] :
+d<sub>i,f</sub> ≥ <em>T</em> }
+</p>
+<p style="text-align:center;font-size:1.2em">
+L<sub>i</sub> = C<sub>i</sub> − <em>S</em>
+</p>
+<p>Here, <em>C</em> is the first threshold-crossing global frame and
+<em>L</em> is latency in frames. The minimum is undefined when no valid point
+reaches the threshold; that case is reported as
+<code>THRESHOLD_NOT_REACHED</code>.</p>
+
+<h3>Consecutive-frame step distance and total distance</h3>
+<p style="text-align:center;font-size:1.2em">
+s<sub>i,f</sub> =
+√[(x<sub>i,f+1</sub>−x<sub>i,f</sub>)² +
+(y<sub>i,f+1</sub>−y<sub>i,f</sub>)²]
+</p>
+<p style="text-align:center;font-size:1.2em">
+D<sub>i</sub> =
+∑<sub>f=S</sub><sup>E−1</sup> s<sub>i,f</sub>
+&nbsp;&nbsp;for valid consecutive-frame pairs only
+</p>
+<p>Each square root can produce a non-integer distance even when the coordinate
+differences are integers. For example:</p>
+<p style="text-align:center;font-size:1.2em">
+√(1² + 1²) = √2 ≈ 1.414213562 pixels
+</p>
+<p>Therefore, total distance is correctly stored as a decimal number. The
+unrounded step distances are summed; no per-step rounding is performed.</p>
+
+<h3>Wall-buffer distance partition</h3>
+<p>The midpoint used to classify a valid movement segment is</p>
+<p style="text-align:center;font-size:1.2em">
+m<sub>i,f</sub> =
+((x<sub>i,f</sub>+x<sub>i,f+1</sub>)/2,
+(y<sub>i,f</sub>+y<sub>i,f+1</sub>)/2).
+</p>
+<p>If the midpoint is inside the primary ROI and its shortest Euclidean distance
+to any ROI boundary segment is less than or equal to the selected wall-buffer
+width, the complete step length is assigned inside the wall buffer. Otherwise,
+an ROI-contained midpoint is assigned outside the wall buffer.</p>
+<p style="text-align:center;font-size:1.2em">
+D<sub>inside</sub> + D<sub>outside</sub> = D<sub>total</sub>
+</p>
+<p>The analogous frame-count partitions are also checked for exact additivity.
+A point or midpoint outside the primary ROI is reported explicitly and is not
+silently assigned to either partition.</p>
+
+<h3>Starting-side assignment for a two-animal fight</h3>
+<p style="text-align:center;font-size:1.2em">
+x<sub>0,S</sub> &lt; x<sub>1,S</sub>
+⇒ animal 0 = LEFT and animal 1 = RIGHT
+</p>
+<p>The assignments are reversed when
+x<sub>1,S</sub> &lt; x<sub>0,S</sub>. Equality or missing values remain
+unassigned.</p>
+
+<h3>Fungus edge-buffer partition</h3>
+<p>For valid centroid frames whose points lie in the secondary ROI, shortest
+distance to the secondary polygon boundary assigns each frame to either the
+inward edge buffer or fungus interior. Valid movement segments are first
+classified as on fungus when their midpoint lies in the secondary ROI, then
+partitioned using the same boundary-distance rule.</p>
+<p style="text-align:center;font-size:1.2em">
+F<sub>edge</sub> + F<sub>interior</sub> = F<sub>fungus</sub>
+</p>
+<p style="text-align:center;font-size:1.2em">
+D<sub>fungus edge</sub> + D<sub>fungus interior</sub> =
+D<sub>fungus</sub>
+</p>
+
+<h3>Social distance and return interactions</h3>
+<p>When both animals are valid, their centroid separation is</p>
+<p style="text-align:center;font-size:1.2em">
+q<sub>f</sub> =
+√[(x<sub>0,f</sub>−x<sub>1,f</sub>)² +
+(y<sub>0,f</sub>−y<sub>1,f</sub>)²].
+</p>
+<p>With the default threshold, a within-range frame satisfies
+<em>q</em><sub>f</sub> ≤ 60 pixels. A missing run from frames <em>a</em>
+through <em>b</em> is counted for the missing animal only when
+<em>q</em><sub>a−1</sub> ≤ 60 and that animal is valid again with its partner
+at frame <em>b</em>+1 ≤ <em>E</em>.</p>
+<p>A return interaction event contains a nonempty run between two within-range
+frames and that run includes at least one frame <em>g</em> where both animals
+are valid and <em>q</em><sub>g</sub> &gt; 60. This enforces the requested
+together, visibly separate, then together-again sequence.</p>
+</body>
+</html>

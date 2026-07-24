@@ -1,0 +1,13 @@
+venv-mac/
+__pycache__/
+*.py[cod]
+.DS_Store
+.matplotlib_cache/
+*.partial*
+
+# Locally downloaded scientific outputs are not source code.
+downloads/
+results/
+pdf_exports/
+*.zip
+
