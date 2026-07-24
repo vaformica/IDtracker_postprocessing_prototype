@@ -77,7 +77,9 @@ Workflow:
 5. Correct missing, ambiguous, or zero starts with **Edit selected start frame**.
    Alternatively, use **Export sessions needing start times**, fill only
    `enter_start_global_frame`, and use **Import completed start-time CSV**.
-6. Double-click **Process?** to check only a few example sessions.
+6. For examples, double-click individual **Process?** cells. For a large
+   reviewed batch, filter to **Ready to process** and click
+   **Check all filtered ready sessions**.
 7. Confirm the inclusive 7200-frame timespan (`end - start`), 30-pixel
    displacement threshold, both ROI-buffer widths, and the fight social
    distance threshold (default 60 pixels).
@@ -212,3 +214,30 @@ Every CSV row and final PDF metadata page records the standalone script
 version. After a complete batch is successfully promoted, the Mac GUI plays a
 chime and opens an **Everything is done** popup. The popup is not emitted for a
 failed or incomplete batch.
+
+## SLURM execution for large batches
+
+The GUI defaults to **SLURM job array**. Each checked, approved, processable
+session becomes one array task. The default maximum concurrency is 20 tasks;
+this is a scheduler throttle, not a request for 20 CPUs in one task. Each task
+requests one CPU, 4 GB of memory, and two hours. The default account is `swat`;
+the partition is left blank so Firebird applies the cluster default. All of
+these values except the one-CPU design are visible before confirmation.
+
+The GUI uploads an immutable copy of the processor, worker, finalizer,
+combiner, and JSON manifest to:
+
+`~/idtracker_reprocessing_v1/slurm_batches/<timestamp>/`
+
+SLURM stdout/stderr logs and one atomic status JSON per session remain in that
+batch folder. A dependent `afterany` finalizer runs after the full array,
+refuses to proceed unless every manifest task succeeded and produced both its
+CSV and PDF, then combines the CSVs, verifies the PDF count, and only then
+promotes the complete CSV and PDF directory. A failed,
+cancelled, timed-out, or incomplete array cannot replace the previous complete
+results. The GUI log reports the array and finalizer job IDs and polls progress
+while it remains open.
+
+**Direct SSH (small test only)** remains available for a few examples. The
+combined CSV records `processing_execution_mode` as `SLURM_ARRAY` or
+`DIRECT_SSH`.

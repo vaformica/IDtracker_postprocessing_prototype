@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 import tkinter as tk
@@ -29,6 +30,9 @@ except ImportError:
 BASE = Path(__file__).resolve().parent
 PROCESSOR = BASE / "processor.py"
 SCRIPT_VERSION = (BASE / "VERSION").read_text(encoding="utf-8").strip()
+SLURM_WORKER = BASE / "slurm_worker.py"
+SLURM_FINALIZER = BASE / "slurm_finalize.py"
+COMBINE_SCRIPT = BASE / "combine_results.py"
 TRAJECTORY_NAMES = {
     "validated.npy": 0,
     "without_gaps.npy": 1,
@@ -625,9 +629,60 @@ class App(tk.Tk):
             sticky="w", padx=8, pady=(2, 7),
         )
 
+        execution_controls = ttk.LabelFrame(
+            self.setup_tab,
+            text="4. Firebird execution",
+        )
+        execution_controls.pack(fill="x", padx=10, pady=4)
+        self.execution_mode = tk.StringVar(value="SLURM job array")
+        self.slurm_max_concurrent = tk.StringVar(value="20")
+        self.slurm_account = tk.StringVar(value="swat")
+        self.slurm_partition = tk.StringVar(value="")
+        self.slurm_time = tk.StringVar(value="02:00:00")
+        self.slurm_memory = tk.StringVar(value="4G")
+        ttk.Label(execution_controls, text="Mode").grid(
+            row=0, column=0, sticky="w", padx=(8, 4), pady=4
+        )
+        ttk.Combobox(
+            execution_controls,
+            textvariable=self.execution_mode,
+            values=["SLURM job array", "Direct SSH (small test only)"],
+            state="readonly",
+            width=27,
+        ).grid(row=0, column=1, sticky="w", padx=(0, 16), pady=4)
+        slurm_fields = [
+            (0, 2, "Maximum simultaneous jobs", self.slurm_max_concurrent, 7),
+            (0, 4, "Account", self.slurm_account, 10),
+            (
+                1, 0, "Partition (blank = cluster default)",
+                self.slurm_partition, 14,
+            ),
+            (1, 2, "Time per session", self.slurm_time, 10),
+            (1, 4, "Memory per session", self.slurm_memory, 8),
+        ]
+        for row, column, label, variable, width in slurm_fields:
+            ttk.Label(execution_controls, text=label).grid(
+                row=row, column=column, sticky="w", padx=(8, 4), pady=4
+            )
+            ttk.Entry(
+                execution_controls, textvariable=variable, width=width
+            ).grid(
+                row=row, column=column + 1,
+                sticky="w", padx=(0, 16), pady=4,
+            )
+        ttk.Label(
+            execution_controls,
+            text=(
+                "SLURM runs one approved session per array task, then combines "
+                "and promotes results only if every task succeeds."
+            ),
+        ).grid(
+            row=2, column=0, columnspan=6, sticky="w", padx=8, pady=(0, 5)
+        )
+
         results = ttk.LabelFrame(
             self.setup_tab,
-            text="4. Results from the latest completed processing run",
+            text="5. Results from the latest completed processing run",
         )
         results.pack(fill="x", padx=10, pady=4)
         self.results_status = tk.StringVar(
@@ -759,6 +814,16 @@ class App(tk.Tk):
                 "Process? column."
             ),
         ).grid(row=0, column=3, rowspan=2, sticky="w", padx=4, pady=2)
+        ttk.Button(
+            start_file_bar,
+            text="Check all filtered ready sessions",
+            command=self.check_all_filtered_ready,
+        ).grid(row=2, column=0, sticky="w", padx=4, pady=(4, 2))
+        ttk.Button(
+            start_file_bar,
+            text="Uncheck all sessions",
+            command=self.uncheck_all_sessions,
+        ).grid(row=2, column=1, sticky="w", padx=4, pady=(4, 2))
         start_file_bar.columnconfigure(3, weight=1)
 
         columns = (
@@ -1608,6 +1673,27 @@ class App(tk.Tk):
         elif column == "#4":
             self.edit_start()
 
+    def check_all_filtered_ready(self):
+        checked = 0
+        for record in self.filtered_records:
+            try:
+                positive_start = int(record.get("start", "")) > 0
+            except (TypeError, ValueError):
+                positive_start = False
+            if record.get("processable") and positive_start:
+                record["use"] = "Yes"
+                checked += 1
+        self._render_records()
+        self.status.set(
+            f"Checked {checked} filtered ready approved session(s)."
+        )
+
+    def uncheck_all_sessions(self):
+        for record in self.all_records:
+            record["use"] = "No"
+        self._render_records()
+        self.status.set("Unchecked all approved sessions.")
+
     def edit_start(self):
         selected = self.table.selection()
         if not selected:
@@ -1826,6 +1912,384 @@ class App(tk.Tk):
 
         self._background(action)
 
+    @staticmethod
+    def _write_remote_text(ssh, remote_python, remote_path, text):
+        command = (
+            f"{shlex.quote(remote_python)} -c "
+            + shlex.quote(
+                "import sys; from pathlib import Path; "
+                "path=Path(sys.argv[1]); path.parent.mkdir(parents=True, exist_ok=True); "
+                "path.write_text(sys.stdin.read(), encoding='utf-8')"
+            )
+            + " "
+            + shlex.quote(remote_path)
+        )
+        ssh.run(command, input_text=text, timeout=300)
+
+    def _run_slurm_batch(
+        self,
+        chosen,
+        blocked,
+        parameters,
+        batch_token,
+        processing_created_at,
+    ):
+        ssh = self.ssh()
+        remote_home = ssh.run('printf "%s" "$HOME"').strip()
+        output_root = expand_remote_path(
+            self.output_root.get(), remote_home
+        ).rstrip("/")
+        remote_python = expand_remote_path(
+            self.remote_python.get(), remote_home
+        )
+        batch_folder = f"{output_root}/slurm_batches/{batch_token}"
+        status_folder = f"{batch_folder}/status"
+        result_folder = f"{batch_folder}/results"
+        log_folder = f"{batch_folder}/logs"
+        plot_stage = f"{batch_folder}/pdfs_staged"
+        matplotlib_cache = f"{batch_folder}/matplotlib_cache"
+        processor_path = f"{batch_folder}/processor.py"
+        worker_path = f"{batch_folder}/slurm_worker.py"
+        finalize_path = f"{batch_folder}/slurm_finalize.py"
+        combine_path = f"{batch_folder}/combine_results.py"
+        manifest_path = f"{batch_folder}/manifest.json"
+        completion_marker = f"{batch_folder}/batch_complete.json"
+        combined_stage = f"{batch_folder}/combined_results_staged.csv"
+        combined_destination = f"{output_root}/combined_results_latest.csv"
+        plot_folder = f"{output_root}/combined_results_latest_pdfs"
+        plot_previous = f"{output_root}/.plot_pdfs_previous"
+
+        self.log(
+            f"Preparing SLURM batch {batch_token} for {len(chosen)} "
+            f"approved ready session(s); script version={SCRIPT_VERSION}."
+        )
+        for record in blocked:
+            self.log(
+                "SKIPPED NO_USABLE_TRAJECTORY: "
+                f"{record['qc_record_id']} | {record['video']} | "
+                f"{record['cell_label']} | {record['session']} | "
+                f"{record['trajectory_status']} | "
+                f"{record.get('trajectory_diagnostic', '')}"
+            )
+        self.work.put(("show_logs", None))
+        ssh.run(
+            f"command -v sbatch >/dev/null && "
+            f"command -v squeue >/dev/null && "
+            f"command -v sacct >/dev/null && "
+            f"test -x {shlex.quote(remote_python)} && "
+            f"mkdir -p {shlex.quote(status_folder)} "
+            f"{shlex.quote(result_folder)} {shlex.quote(log_folder)} "
+            f"{shlex.quote(plot_stage)} {shlex.quote(matplotlib_cache)}",
+            timeout=120,
+        )
+        ssh.run(
+            f"{shlex.quote(remote_python)} -c "
+            + shlex.quote("import numpy, h5py, matplotlib"),
+            timeout=120,
+        )
+        self._write_remote_text(
+            ssh, remote_python, processor_path,
+            PROCESSOR.read_text(encoding="utf-8"),
+        )
+        self._write_remote_text(
+            ssh, remote_python, worker_path,
+            SLURM_WORKER.read_text(encoding="utf-8"),
+        )
+        self._write_remote_text(
+            ssh, remote_python, finalize_path,
+            SLURM_FINALIZER.read_text(encoding="utf-8"),
+        )
+        self._write_remote_text(
+            ssh, remote_python, combine_path,
+            COMBINE_SCRIPT.read_text(encoding="utf-8"),
+        )
+
+        items = []
+        for index, record in enumerate(chosen):
+            result_path = f"{result_folder}/{index:05d}.csv"
+            plot_identity = (
+                f"{PurePosixPath(record['video']).stem}"
+                f"__{record['cell_label']}"
+                f"__{record['qc_record_id']}"
+            )
+            plot_stem = re.sub(
+                r"[^A-Za-z0-9_.-]+", "_", plot_identity
+            ).strip("._") or f"session_{index}"
+            plot_output = f"{plot_stage}/{index:05d}__{plot_stem}.pdf"
+            processor_args = [
+                "--trajectory", record["trajectory"],
+                "--session", record["session"],
+                "--start", str(record["start"]),
+                "--window", str(parameters["window"]),
+                "--threshold", str(parameters["threshold"]),
+                "--wall-buffer-px", str(parameters["wall_buffer"]),
+                "--fungus-buffer-px", str(parameters["fungus_buffer"]),
+                "--social-distance-threshold-px",
+                str(parameters["social_distance"]),
+                "--turtling-window-frames",
+                str(parameters["turtling_window"]),
+                "--turtling-min-path-px",
+                str(parameters["turtling_min_path"]),
+                "--turtling-max-radius90-px",
+                str(parameters["turtling_max_radius90"]),
+                "--turtling-min-turn-rotations",
+                str(parameters["turtling_min_turns"]),
+                "--turtling-max-straightness",
+                str(parameters["turtling_max_straightness"]),
+                "--turtling-max-step-px",
+                str(parameters["turtling_max_step"]),
+                "--analysis-type", record["analysis"],
+                "--video", record["video"],
+                "--cell-label", record["cell_label"],
+                "--qc-record-id", record["qc_record_id"],
+                "--output", result_path,
+                "--plot-output", plot_output,
+                "--overwrite",
+            ]
+            if parameters["use_social_disappearance"]:
+                processor_args.append(
+                    "--use-social-disappearance-in-calculations"
+                )
+            items.append(
+                {
+                    "processor_args": processor_args,
+                    "source_result_file": result_path,
+                    "plot_output": plot_output,
+                    "qc_record_id": record["qc_record_id"],
+                    "video": record["video"],
+                    "cell_label": record["cell_label"],
+                    "analysis_type": record["analysis"],
+                    "camera": record["camera"],
+                    "camera_id": record["camera_id"],
+                    "video_year": record["video_year"],
+                    "recording_date": record["recording_date"],
+                    "recording_time": record["recording_time"],
+                    "act": record["act"],
+                    "processing_batch_id": batch_token,
+                    "processing_created_at": processing_created_at,
+                    "processing_execution_mode": "SLURM_ARRAY",
+                }
+            )
+        manifest = {
+            "schema_version": 1,
+            "script_version": SCRIPT_VERSION,
+            "remote_python": remote_python,
+            "processor_path": processor_path,
+            "combine_script": combine_path,
+            "status_folder": status_folder,
+            "matplotlib_cache": matplotlib_cache,
+            "plot_stage": plot_stage,
+            "plot_folder": plot_folder,
+            "plot_previous": plot_previous,
+            "combined_stage": combined_stage,
+            "combined_destination": combined_destination,
+            "completion_marker": completion_marker,
+            "items": items,
+        }
+        self._write_remote_text(
+            ssh,
+            remote_python,
+            manifest_path,
+            json.dumps(manifest, indent=2, sort_keys=True),
+        )
+
+        sbatch_options = [
+            "sbatch",
+            "--parsable",
+            f"--job-name=idpp_{batch_token[:14]}",
+            f"--array=0-{len(items) - 1}%{parameters['slurm_max_concurrent']}",
+            "--cpus-per-task=1",
+            f"--mem={parameters['slurm_memory']}",
+            f"--time={parameters['slurm_time']}",
+            f"--output={log_folder}/task_%A_%a.out",
+            f"--error={log_folder}/task_%A_%a.err",
+        ]
+        if parameters["slurm_account"]:
+            sbatch_options.append(
+                f"--account={parameters['slurm_account']}"
+            )
+        if parameters["slurm_partition"]:
+            sbatch_options.append(
+                f"--partition={parameters['slurm_partition']}"
+            )
+        worker_command = (
+            f"{shlex.quote(remote_python)} {shlex.quote(worker_path)} "
+            f"{shlex.quote(manifest_path)}"
+        )
+        array_submit = " ".join(
+            shlex.quote(value) for value in sbatch_options
+        ) + " --wrap=" + shlex.quote(worker_command)
+        array_job_id = (
+            ssh.run(array_submit, timeout=120).strip().split(";", 1)[0]
+        )
+        if not array_job_id.isdigit():
+            raise RuntimeError(
+                f"Could not parse SLURM array job ID: {array_job_id!r}"
+            )
+
+        finalize_options = [
+            "sbatch",
+            "--parsable",
+            f"--job-name=idpp_finish_{batch_token[:10]}",
+            f"--dependency=afterany:{array_job_id}",
+            "--cpus-per-task=1",
+            "--mem=2G",
+            "--time=00:30:00",
+            f"--output={log_folder}/finalize_%j.out",
+            f"--error={log_folder}/finalize_%j.err",
+        ]
+        if parameters["slurm_account"]:
+            finalize_options.append(
+                f"--account={parameters['slurm_account']}"
+            )
+        if parameters["slurm_partition"]:
+            finalize_options.append(
+                f"--partition={parameters['slurm_partition']}"
+            )
+        finalize_command = (
+            f"{shlex.quote(remote_python)} {shlex.quote(finalize_path)} "
+            f"{shlex.quote(manifest_path)}"
+        )
+        finalize_submit = " ".join(
+            shlex.quote(value) for value in finalize_options
+        ) + " --wrap=" + shlex.quote(finalize_command)
+        finalize_job_id = (
+            ssh.run(finalize_submit, timeout=120).strip().split(";", 1)[0]
+        )
+        if not finalize_job_id.isdigit():
+            raise RuntimeError(
+                f"Could not parse SLURM finalizer job ID: "
+                f"{finalize_job_id!r}"
+            )
+        self.log(
+            f"SLURM submitted: array job {array_job_id}; dependent finalizer "
+            f"job {finalize_job_id}; maximum simultaneous array tasks "
+            f"{parameters['slurm_max_concurrent']}."
+        )
+        self.work.put((
+            "status",
+            f"SLURM array {array_job_id}: 0 of {len(items)} task(s) finished. "
+            f"Finalizer: {finalize_job_id}.",
+        ))
+
+        summary_code = (
+            "import json,sys; from pathlib import Path; "
+            "m=json.loads(Path(sys.argv[1]).read_text()); "
+            "s=[json.loads(p.read_text()) for p in "
+            "sorted(Path(m['status_folder']).glob('*.json'))]; "
+            "marker=Path(m['completion_marker']); "
+            "print(json.dumps({'finished':len(s),"
+            "'failed':[x for x in s if x.get('status')!='SUCCESS'],"
+            "'complete':json.loads(marker.read_text()) if marker.exists() "
+            "else None}))"
+        )
+        deadline = time.monotonic() + 24 * 60 * 60
+        last_progress = None
+        finalizer_completed_without_marker = 0
+        while time.monotonic() < deadline:
+            summary_text = ssh.run(
+                f"{shlex.quote(remote_python)} -c "
+                f"{shlex.quote(summary_code)} "
+                f"{shlex.quote(manifest_path)}",
+                timeout=120,
+            ).strip()
+            summary = json.loads(summary_text)
+            progress = (int(summary["finished"]), len(summary["failed"]))
+            if progress != last_progress:
+                self.log(
+                    f"SLURM array {array_job_id}: {progress[0]} of "
+                    f"{len(items)} task(s) wrote status; failures={progress[1]}."
+                )
+                self.work.put((
+                    "status",
+                    f"SLURM array {array_job_id}: {progress[0]} of "
+                    f"{len(items)} finished; finalizer {finalize_job_id}.",
+                ))
+                last_progress = progress
+            if summary["failed"]:
+                first = summary["failed"][0]
+                raise RuntimeError(
+                    "SLURM session task failed. "
+                    f"QC={first.get('qc_record_id', 'unknown')}; "
+                    f"error={first.get('error', 'see Firebird SLURM logs')}; "
+                    f"logs={log_folder}"
+                )
+            if summary["complete"]:
+                complete = summary["complete"]
+                self.work.put(("combined_ready", complete["combined_output"]))
+                self.work.put(("plots_ready", complete["pdf_folder"]))
+                self.work.put((
+                    "status",
+                    f"SLURM batch completed: {len(items)} ready session(s); "
+                    f"skipped {len(blocked)} unready session(s).",
+                ))
+                self.log(
+                    f"SLURM batch completed successfully. Array job "
+                    f"{array_job_id}; finalizer job {finalize_job_id}; "
+                    f"combined CSV: {complete['combined_output']}; "
+                    f"PDF folder: {complete['pdf_folder']}."
+                )
+                self.work.put((
+                    "processing_complete",
+                    {
+                        "processed": len(items),
+                        "skipped": len(blocked),
+                        "script_version": SCRIPT_VERSION,
+                    },
+                ))
+                return
+
+            queue_text = ssh.run(
+                f"squeue -h -j "
+                f"{shlex.quote(array_job_id + ',' + finalize_job_id)} "
+                f"-o '%i|%T'",
+                timeout=120,
+            ).strip()
+            accounting = ssh.run(
+                f"sacct -n -P -j "
+                f"{shlex.quote(array_job_id + ',' + finalize_job_id)} "
+                f"--format=JobIDRaw,State,ExitCode",
+                timeout=120,
+            )
+            failure_states = {
+                "FAILED", "CANCELLED", "TIMEOUT", "OUT_OF_MEMORY",
+                "NODE_FAIL", "BOOT_FAIL", "DEADLINE",
+                "PREEMPTED", "REVOKED",
+            }
+            finalizer_is_completed = False
+            for line in accounting.splitlines():
+                parts = line.split("|")
+                if len(parts) < 2:
+                    continue
+                state = (
+                    parts[1].split(None, 1)[0].split("+", 1)[0]
+                )
+                if state in failure_states:
+                    raise RuntimeError(
+                        f"SLURM job {parts[0]} ended as {parts[1]}; "
+                        f"logs={log_folder}"
+                    )
+                if (
+                    parts[0] == finalize_job_id
+                    and state == "COMPLETED"
+                ):
+                    finalizer_is_completed = True
+            if finalizer_is_completed:
+                finalizer_completed_without_marker += 1
+                if finalizer_completed_without_marker >= 3:
+                    raise RuntimeError(
+                        f"SLURM finalizer {finalize_job_id} completed but no "
+                        f"success marker appeared; logs={log_folder}"
+                    )
+            else:
+                finalizer_completed_without_marker = 0
+            time.sleep(10)
+        raise RuntimeError(
+            f"Stopped monitoring SLURM after 24 hours. Jobs may still exist: "
+            f"array={array_job_id}, finalizer={finalize_job_id}; "
+            f"logs={log_folder}"
+        )
+
     def process(self):
         if self.processing_running:
             self.notebook.select(self.logs_tab)
@@ -1869,6 +2333,12 @@ class App(tk.Tk):
                 self.turtling_max_straightness.get()
             )
             turtling_max_step = float(self.turtling_max_step.get())
+            execution_mode = self.execution_mode.get()
+            slurm_max_concurrent = int(self.slurm_max_concurrent.get())
+            slurm_account = self.slurm_account.get().strip()
+            slurm_partition = self.slurm_partition.get().strip()
+            slurm_time = self.slurm_time.get().strip()
+            slurm_memory = self.slurm_memory.get().strip()
             if (
                 window <= 0
                 or threshold <= 0
@@ -1881,6 +2351,9 @@ class App(tk.Tk):
                 or turtling_min_turns <= 0
                 or not 0 <= turtling_max_straightness <= 1
                 or turtling_max_step <= 0
+                or slurm_max_concurrent <= 0
+                or not slurm_time
+                or not slurm_memory
             ):
                 raise ValueError
             for record in chosen:
@@ -1904,6 +2377,16 @@ class App(tk.Tk):
         )
         confirm_message = (
             f"Process {len(chosen)} checked session(s) only?\n\n"
+            f"Execution: {execution_mode}\n"
+            + (
+                f"SLURM maximum simultaneous tasks: {slurm_max_concurrent}\n"
+                f"SLURM account: {slurm_account or 'cluster default'}\n"
+                f"SLURM partition: {slurm_partition or 'cluster default'}\n"
+                f"SLURM time/memory per session: {slurm_time} / {slurm_memory}\n"
+                if execution_mode == "SLURM job array"
+                else ""
+            )
+            +
             f"Inclusive end − start: {window} frames\nThreshold: {threshold:g} pixels\n"
             f"Wall buffer: {wall_buffer:g} pixels\n"
             f"Fungus inward buffer for fights: {fungus_buffer:g} pixels\n"
@@ -1937,7 +2420,27 @@ class App(tk.Tk):
         self.current_batch_token = batch_token
         self.auto_download_started_for = ""
 
-        def action():
+        parameters = {
+            "window": window,
+            "threshold": threshold,
+            "wall_buffer": wall_buffer,
+            "fungus_buffer": fungus_buffer,
+            "social_distance": social_distance,
+            "use_social_disappearance": use_social_disappearance,
+            "turtling_window": turtling_window,
+            "turtling_min_path": turtling_min_path,
+            "turtling_max_radius90": turtling_max_radius90,
+            "turtling_min_turns": turtling_min_turns,
+            "turtling_max_straightness": turtling_max_straightness,
+            "turtling_max_step": turtling_max_step,
+            "slurm_max_concurrent": slurm_max_concurrent,
+            "slurm_account": slurm_account,
+            "slurm_partition": slurm_partition,
+            "slurm_time": slurm_time,
+            "slurm_memory": slurm_memory,
+        }
+
+        def direct_action():
             script = PROCESSOR.read_text(encoding="utf-8")
             remote_home = self.ssh().run('printf "%s" "$HOME"').strip()
             output_root = expand_remote_path(self.output_root.get(), remote_home)
@@ -2066,6 +2569,7 @@ class App(tk.Tk):
                         "act": record["act"],
                         "processing_batch_id": batch_token,
                         "processing_created_at": processing_created_at,
+                        "processing_execution_mode": "DIRECT_SSH",
                     }
                 )
             combined_destination = (
@@ -2160,7 +2664,16 @@ class App(tk.Tk):
 
         def guarded_processing():
             try:
-                action()
+                if execution_mode == "SLURM job array":
+                    self._run_slurm_batch(
+                        chosen,
+                        blocked,
+                        parameters,
+                        batch_token,
+                        processing_created_at,
+                    )
+                else:
+                    direct_action()
             except Exception:
                 self.work.put(("processing_results_failed", None))
                 raise

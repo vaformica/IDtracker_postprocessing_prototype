@@ -13,7 +13,7 @@ table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8
 </style>
 </head>
 <body>
-<h1>Standalone IDtracker.ai post-processing: version 0.3.0</h1>
+<h1>Standalone IDtracker.ai post-processing: version 0.4.0</h1>
 <p>This document describes every calculation performed by <code>processor.py</code>.
 The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
 
@@ -259,6 +259,28 @@ comparison PDFs. This is preliminary calibration, not general validation.
 Additional positive and negative examples should be reviewed before using the
 measure for biological inference.</p>
 
+<h2>SLURM batch execution and completeness</h2>
+<p>The default large-batch mode submits one approved, processable session per
+SLURM array task. The default throttle is 20 simultaneous tasks. Each task
+requests one CPU, 4 GB of memory, and two hours; the GUI exposes concurrency,
+account, partition, time, and memory before submission. The current Firebird
+defaults are account <code>swat</code> and a blank partition, which delegates
+partition selection to the cluster.</p>
+<p>Each task reads one immutable JSON-manifest item and writes one result CSV,
+one PDF, and one atomic status JSON. A separate finalizer is submitted with an
+<code>afterany</code> dependency on the entire array so it always audits the
+finished batch. It refuses to proceed unless every task status and expected
+file is successful, then combines the CSVs, checks that the staged PDF count
+equals the manifest session count, and promotes the CSV and PDF folder as one
+complete batch. If any task fails, is cancelled, times out, or does not produce
+its expected files, the finalizer fails without replacing the prior complete
+outputs.</p>
+<p>The GUI log records the array and finalizer job IDs and displays completed
+task counts while it remains open. The audible/visible completion alert occurs
+only after the finalizer writes its success marker. Combined rows record
+<code>processing_execution_mode</code> as <code>SLURM_ARRAY</code> or
+<code>DIRECT_SSH</code>.</p>
+
 <h2>PDF audit plots</h2>
 <p>Each processed session receives one multipage PDF in
 <code>combined_results_latest_pdfs</code>. Every page prominently identifies the full
@@ -354,6 +376,7 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>trajectory_source_kind</td><td>Exact selected IDtracker source category, including explicit raw fallback categories.</td></tr>
 <tr><td>session_folder, trajectory_file</td><td>Provenance.</td></tr>
 <tr><td>script_version</td><td>Standalone post-processing script version used to generate the row.</td></tr>
+<tr><td>processing_execution_mode</td><td>Combined-CSV provenance: SLURM_ARRAY or DIRECT_SSH.</td></tr>
 </table>
 <p>The combined batch CSV adds camera, camera ID, video year, recording date,
 recording time, ACT, processing batch ID, and an ISO-8601 processing date/time

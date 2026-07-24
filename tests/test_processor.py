@@ -1,5 +1,6 @@
 import csv
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -665,6 +666,7 @@ class ProcessorTests(unittest.TestCase):
                         "act": f"ACT{index}",
                         "processing_batch_id": "20260724_120000",
                         "processing_created_at": "2026-07-24T12:00:00-04:00",
+                        "processing_execution_mode": "SLURM_ARRAY",
                     }
                     for index, source in enumerate(sources, 1)
                 ],
@@ -693,6 +695,10 @@ class ProcessorTests(unittest.TestCase):
                 rows[0]["processing_created_at"],
                 "2026-07-24T12:00:00-04:00",
             )
+            self.assertEqual(
+                rows[0]["processing_execution_mode"],
+                "SLURM_ARRAY",
+            )
             request["overwrite"] = True
             second = subprocess.run(
                 [sys.executable, "-c", COMBINE_RESULTS],
@@ -705,6 +711,171 @@ class ProcessorTests(unittest.TestCase):
             self.assertFalse(
                 any(root.glob("combined.csv.partial.*"))
             )
+
+    def test_slurm_worker_and_finalizer_promote_only_complete_batch(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            status_folder = root / "status"
+            result_folder = root / "results"
+            plot_stage = root / "pdfs_staged"
+            plot_folder = root / "pdfs_latest"
+            for directory in (status_folder, result_folder, plot_stage):
+                directory.mkdir()
+            fake_processor = root / "fake_processor.py"
+            fake_processor.write_text(
+                "\n".join(
+                    [
+                        "import argparse,csv",
+                        "from pathlib import Path",
+                        "p=argparse.ArgumentParser()",
+                        "p.add_argument('--output', required=True)",
+                        "p.add_argument('--plot-output', required=True)",
+                        "a=p.parse_args()",
+                        "Path(a.output).parent.mkdir(parents=True, exist_ok=True)",
+                        "with Path(a.output).open('w', newline='', encoding='utf-8') as f:",
+                        "    w=csv.DictWriter(f, fieldnames=['script_version','value'])",
+                        "    w.writeheader(); w.writerow({'script_version':'0.4.0','value':'7'})",
+                        "Path(a.plot_output).write_bytes(b'%PDF-1.4 fake')",
+                    ]
+                ),
+                encoding="utf-8",
+            )
+            result_file = result_folder / "00000.csv"
+            plot_file = plot_stage / "00000.pdf"
+            manifest = {
+                "script_version": SCRIPT_VERSION,
+                "remote_python": sys.executable,
+                "processor_path": str(fake_processor),
+                "combine_script": str(
+                    Path(__file__).resolve().parents[1]
+                    / "combine_results.py"
+                ),
+                "status_folder": str(status_folder),
+                "matplotlib_cache": str(root / "mpl"),
+                "plot_stage": str(plot_stage),
+                "plot_folder": str(plot_folder),
+                "plot_previous": str(root / "pdfs_previous"),
+                "combined_stage": str(root / "combined_staged.csv"),
+                "combined_destination": str(root / "combined_latest.csv"),
+                "completion_marker": str(root / "batch_complete.json"),
+                "items": [
+                    {
+                        "processor_args": [
+                            "--output", str(result_file),
+                            "--plot-output", str(plot_file),
+                        ],
+                        "source_result_file": str(result_file),
+                        "plot_output": str(plot_file),
+                        "qc_record_id": "QC1",
+                        "video": "video.mp4",
+                        "cell_label": "A1",
+                        "analysis_type": "fight",
+                        "camera": "1",
+                        "camera_id": "123",
+                        "video_year": "2026",
+                        "recording_date": "20260724",
+                        "recording_time": "1200",
+                        "act": "ACT1",
+                        "processing_batch_id": "BATCH1",
+                        "processing_created_at": "2026-07-24T12:00:00-04:00",
+                        "processing_execution_mode": "SLURM_ARRAY",
+                    }
+                ],
+            }
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            environment = dict(os.environ, SLURM_ARRAY_TASK_ID="0")
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        Path(__file__).resolve().parents[1]
+                        / "slurm_worker.py"
+                    ),
+                    str(manifest_path),
+                ],
+                env=environment,
+                check=True,
+            )
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        Path(__file__).resolve().parents[1]
+                        / "slurm_finalize.py"
+                    ),
+                    str(manifest_path),
+                ],
+                check=True,
+            )
+            self.assertTrue((root / "batch_complete.json").is_file())
+            self.assertTrue((root / "combined_latest.csv").is_file())
+            self.assertTrue((plot_folder / "00000.pdf").is_file())
+            self.assertFalse(plot_stage.exists())
+
+    def test_slurm_finalizer_failure_preserves_previous_complete_outputs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            status_folder = root / "status"
+            plot_stage = root / "pdfs_staged"
+            plot_folder = root / "pdfs_latest"
+            status_folder.mkdir()
+            plot_stage.mkdir()
+            plot_folder.mkdir()
+            (plot_stage / "new.pdf").write_bytes(b"new")
+            (plot_folder / "old.pdf").write_bytes(b"old")
+            combined_destination = root / "combined_latest.csv"
+            combined_destination.write_text("old complete\n", encoding="utf-8")
+            manifest = {
+                "script_version": SCRIPT_VERSION,
+                "remote_python": sys.executable,
+                "combine_script": str(
+                    Path(__file__).resolve().parents[1]
+                    / "combine_results.py"
+                ),
+                "status_folder": str(status_folder),
+                "plot_stage": str(plot_stage),
+                "plot_folder": str(plot_folder),
+                "plot_previous": str(root / "pdfs_previous"),
+                "combined_stage": str(root / "combined_staged.csv"),
+                "combined_destination": str(combined_destination),
+                "completion_marker": str(root / "batch_complete.json"),
+                "items": [
+                    {
+                        "source_result_file": str(root / "missing.csv"),
+                        "plot_output": str(plot_stage / "new.pdf"),
+                        "qc_record_id": "QC_FAILED",
+                    }
+                ],
+            }
+            manifest_path = root / "manifest.json"
+            manifest_path.write_text(
+                json.dumps(manifest), encoding="utf-8"
+            )
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(
+                        Path(__file__).resolve().parents[1]
+                        / "slurm_finalize.py"
+                    ),
+                    str(manifest_path),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(
+                combined_destination.read_text(encoding="utf-8"),
+                "old complete\n",
+            )
+            self.assertEqual(
+                (plot_folder / "old.pdf").read_bytes(),
+                b"old",
+            )
+            self.assertFalse((root / "batch_complete.json").exists())
 
     def test_missing_start_report_and_atomic_validation(self):
         base = {

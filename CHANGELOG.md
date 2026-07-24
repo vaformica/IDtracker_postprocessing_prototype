@@ -4,6 +4,29 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.4.0 - 2026-07-24
+
+- Added a GUI-selectable SLURM job-array execution mode for large approved
+  batches; it is now the default execution mode.
+- Added editable SLURM maximum concurrency, account, partition, time, and
+  memory controls. Defaults are 20 simultaneous tasks, account `swat`, the
+  cluster's default partition, two hours, one CPU, and 4 GB per session.
+- Added one manifest-driven worker per selected ready session and a dependent
+  `afterany` finalizer job that audits all task outcomes and refuses promotion
+  unless every task succeeded.
+- Added per-task status JSON and SLURM stdout/stderr logs under the timestamped
+  remote batch folder.
+- Preserved the previously complete combined CSV and PDF folder unless all
+  array tasks succeed, all expected files are verified, combination succeeds,
+  and the finalizer atomically promotes the batch.
+- Added GUI polling of SLURM progress, explicit array/finalizer job IDs in the
+  log, and the completion chime/popup only after successful final promotion.
+- Retained direct SSH processing as an explicitly labeled small-test fallback.
+- Added `processing_execution_mode` to the combined CSV provenance fields.
+- Added **Check all filtered ready sessions** and **Uncheck all sessions**
+  controls so large approved subsets can be selected without hundreds of
+  double-clicks.
+
 ## 0.3.0 - 2026-07-24
 
 - Added a completion chime and popup that appears only after the complete CSV

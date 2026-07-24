@@ -27,6 +27,7 @@ def main():
         "act",
         "processing_batch_id",
         "processing_created_at",
+        "processing_execution_mode",
         "source_result_file",
     ]
     rows = []
@@ -60,6 +61,9 @@ def main():
                         ),
                         "processing_created_at": item.get(
                             "processing_created_at", ""
+                        ),
+                        "processing_execution_mode": item.get(
+                            "processing_execution_mode", ""
                         ),
                         "source_result_file": str(source),
                     }

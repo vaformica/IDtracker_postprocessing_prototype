@@ -8,6 +8,8 @@ script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 mkdir -p "$install_dir"
 cp "$script_dir/processor.py" "$install_dir/processor.py"
 cp "$script_dir/combine_results.py" "$install_dir/combine_results.py"
+cp "$script_dir/slurm_worker.py" "$install_dir/slurm_worker.py"
+cp "$script_dir/slurm_finalize.py" "$install_dir/slurm_finalize.py"
 cp "$script_dir/METHODS.html" "$install_dir/METHODS.html"
 cp "$script_dir/README.md" "$install_dir/README.md"
 cp "$script_dir/ANALYSIS_REQUIREMENTS_REVIEW.md" \
