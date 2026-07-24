@@ -10,6 +10,7 @@ import re
 import shlex
 import shutil
 import subprocess
+import sys
 import threading
 from datetime import datetime
 from pathlib import Path, PurePosixPath
@@ -27,6 +28,7 @@ except ImportError:
 
 BASE = Path(__file__).resolve().parent
 PROCESSOR = BASE / "processor.py"
+SCRIPT_VERSION = (BASE / "VERSION").read_text(encoding="utf-8").strip()
 TRAJECTORY_NAMES = {
     "validated.npy": 0,
     "without_gaps.npy": 1,
@@ -532,7 +534,7 @@ class App(tk.Tk):
         self.wall_buffer = tk.StringVar(value="30")
         self.fungus_buffer = tk.StringVar(value="30")
         self.social_distance = tk.StringVar(value="60")
-        self.use_social_disappearance = tk.BooleanVar(value=False)
+        self.use_social_disappearance = tk.BooleanVar(value=True)
         parameter_fields = [
             (
                 0, 0, "Inclusive end - start (frames)",
@@ -568,19 +570,21 @@ class App(tk.Tk):
         ).grid(
             row=2, column=2, columnspan=3, sticky="w", padx=8, pady=4
         )
+        ttk.Label(
+            controls,
+            text=(
+                "Checked by default. The imputed-frame CSV column counts only "
+                "partner locations actually copied for that animal."
+            ),
+        ).grid(
+            row=3, column=0, columnspan=5, sticky="w", padx=8, pady=(2, 6)
+        )
         controls.columnconfigure(4, weight=1)
         ttk.Button(
             controls,
             text="Edit selected start frame",
             command=self.edit_start,
-        ).grid(row=3, column=0, columnspan=2, sticky="w", padx=8, pady=(6, 8))
-        self.process_button = ttk.Button(
-            controls, text="Process checked sessions", command=self.process
-        )
-        self.process_button.grid(
-            row=3, column=2, columnspan=2, sticky="w", padx=8, pady=(6, 8)
-        )
-
+        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 8))
         turtling_controls = ttk.LabelFrame(
             self.setup_tab,
             text="3. Provisional tight-loop turtling candidate detector",
@@ -740,6 +744,22 @@ class App(tk.Tk):
             text="Export sessions with no trajectory file",
             command=self.export_missing_trajectory_report,
         ).grid(row=1, column=1, sticky="w", padx=4, pady=2)
+        self.process_button = ttk.Button(
+            start_file_bar,
+            text="Process checked sessions",
+            command=self.process,
+        )
+        self.process_button.grid(
+            row=0, column=2, rowspan=2, sticky="nsw", padx=(18, 4), pady=2
+        )
+        ttk.Label(
+            start_file_bar,
+            text=(
+                "The process button uses every row marked Yes in the "
+                "Process? column."
+            ),
+        ).grid(row=0, column=3, rowspan=2, sticky="w", padx=4, pady=2)
+        start_file_bar.columnconfigure(3, weight=1)
 
         columns = (
             "use", "trajectory_status", "status", "start", "video_name", "camera",
@@ -883,6 +903,8 @@ class App(tk.Tk):
                     self.process_button.configure(state="normal")
                     self.download_button.configure(state="normal")
                     self.plot_download_button.configure(state="normal")
+                elif kind == "processing_complete":
+                    self._completion_alert(payload)
                 elif kind == "combined_ready":
                     self.last_combined_remote = payload
                     self.download_button.configure(state="normal")
@@ -918,6 +940,35 @@ class App(tk.Tk):
         except queue.Empty:
             pass
         self.after(100, self._poll)
+
+    def _completion_alert(self, payload):
+        """Give an audible and visible alert only after a complete promotion."""
+        try:
+            if sys.platform == "darwin":
+                sound = Path("/System/Library/Sounds/Glass.aiff")
+                if sound.is_file():
+                    subprocess.Popen(
+                        ["afplay", str(sound)],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                    )
+                else:
+                    self.bell()
+            else:
+                self.bell()
+        except Exception:
+            self.bell()
+        messagebox.showinfo(
+            "Processing complete",
+            (
+                f"Everything is done.\n\n"
+                f"Processed: {payload['processed']} ready session(s)\n"
+                f"Skipped: {payload['skipped']} session(s)\n"
+                f"Script version: {payload['script_version']}\n\n"
+                "The complete combined CSV and matching PDF folder are ready "
+                "to download."
+            ),
+        )
 
     def test_ssh(self):
         def action():
@@ -1893,6 +1944,7 @@ class App(tk.Tk):
             remote_python = expand_remote_path(self.remote_python.get(), remote_home)
             self.log(
                 f"Processing started for {len(chosen)} checked session(s); "
+                f"script version={SCRIPT_VERSION}; "
                 f"inclusive span={window}, wake threshold={threshold:g} px, "
                 f"wall buffer={wall_buffer:g} px, "
                 f"fungus buffer={fungus_buffer:g} px, "
@@ -2086,6 +2138,14 @@ class App(tk.Tk):
                 f"Combined CSV: {combined_destination}. "
                 f"PDF folder: {plot_folder}"
             )
+            self.work.put((
+                "processing_complete",
+                {
+                    "processed": len(chosen),
+                    "skipped": len(blocked),
+                    "script_version": SCRIPT_VERSION,
+                },
+            ))
 
         self.processing_running = True
         self.process_button.configure(state="disabled")

@@ -10,6 +10,7 @@ import numpy as np
 
 from processor import (
     IDTRACKER_TRAJECTORY_SOURCES,
+    SCRIPT_VERSION,
     analyze,
     compute_social_candidates,
     compute_turtling_candidates,
@@ -510,6 +511,7 @@ class ProcessorTests(unittest.TestCase):
             all_text = "\n".join(
                 page.extract_text() or "" for page in reader.pages
             )
+            self.assertIn(f"Script: v{SCRIPT_VERSION}", all_text)
             self.assertIn("Social-distance and disappearance", all_text)
             self.assertIn("Translucent ROI-buffer audit map", all_text)
 
@@ -572,6 +574,59 @@ class ProcessorTests(unittest.TestCase):
         )
         broad_result = compute_turtling_candidates(broad)
         self.assertEqual(int(broad_result["mask"].sum()), 0)
+
+    def test_fight_turtling_on_fungus_is_excluded_from_outputs(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "session.json").write_text(
+                json.dumps(
+                    {
+                        "roi_list": [
+                            "+ Polygon [[0, 0], [500, 0], [500, 500], [0, 500]]",
+                            "+ Polygon [[70, 170], [130, 170], [130, 230], [70, 230]]",
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((220, 2, 2), dtype=float)
+            angles = np.linspace(0, 12 * np.pi, 150)
+            arr[10:160, 0, :] = np.column_stack(
+                [100 + 10 * np.cos(angles), 200 + 10 * np.sin(angles)]
+            )
+            arr[10:160, 1, :] = [400, 400]
+            np.save(trajectory, arr)
+            animal0 = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=149,
+                threshold=30,
+                analysis_type="fight",
+            )[0]
+            self.assertEqual(animal0["turtling_candidate_frames"], 0)
+            self.assertEqual(animal0["turtling_candidate_events"], 0)
+            self.assertEqual(
+                animal0[
+                    "turtling_candidate_proportion_of_detected_frames"
+                ],
+                0.0,
+            )
+
+    def test_script_version_matches_version_file_and_is_written(self):
+        self.assertEqual(
+            SCRIPT_VERSION,
+            (Path(__file__).resolve().parents[1] / "VERSION")
+            .read_text(encoding="utf-8")
+            .strip(),
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            np.save(trajectory, np.zeros((30, 1, 2), dtype=float))
+            row = analyze(trajectory, root, 10, 5, 30)[0]
+            self.assertEqual(row["script_version"], SCRIPT_VERSION)
 
     def test_combined_csv_preserves_rows_and_provenance(self):
         with tempfile.TemporaryDirectory() as folder:

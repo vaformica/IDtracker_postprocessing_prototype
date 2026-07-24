@@ -13,7 +13,7 @@ table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8
 </style>
 </head>
 <body>
-<h1>Minimal IDtracker.ai post-processing: version 1</h1>
+<h1>Standalone IDtracker.ai post-processing: version 0.3.0</h1>
 <p>This document describes every calculation performed by <code>processor.py</code>.
 The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
 
@@ -179,7 +179,8 @@ A missing-only gap is not evidence of separation and cannot create a return
 event.</p>
 <h3>Optional social-disappearance substitution</h3>
 <p>The GUI checkbox <strong>Use social disappearance in distance/location
-calculations</strong> defaults to off. When it is on, the visible partner's
+calculations</strong> defaults to on and can be turned off before processing.
+When it is on, the visible partner's
 centroid is copied to the missing animal at each qualifying
 social-disappearance frame. The substituted series is used for:</p>
 <ul>
@@ -239,6 +240,18 @@ default 0.25.</li>
 <p>Every valid-coordinate frame belonging to at least one qualifying window is
 marked as a candidate. Missing frames are not marked. A candidate event is one
 contiguous run of marked frames; events are not merged across gaps.</p>
+<p>For fight analyses only, each marked frame is then tested against the
+secondary ROI, <code>roi_list[1]</code>. If the animal's original centroid is
+on the boundary or inside that fungus polygon, the frame is removed from the
+turtling candidate mask. It therefore contributes to neither the reported
+candidate-frame count, candidate proportion, contiguous-event count, nor the
+dark-red PDF overlay. BA analyses have no secondary-ROI exclusion.</p>
+<p>The reported turtling proportion for animal <em>i</em> is</p>
+<p class="formula">turtling candidate proportion =
+fungus-excluded candidate frames /
+original valid detected-coordinate frames in the inclusive analysis window.</p>
+<p>If an animal has no valid detected-coordinate frames, the proportion is
+left blank rather than dividing by zero.</p>
 <p>The defaults were provisionally checked against the five supplied PDFs:
 they identified candidate regions in all three PDFs containing dark-red box
 annotations and produced zero candidate frames in the two supplied unboxed
@@ -321,11 +334,12 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>social_disappearance_frames</td><td>Animal-specific missing frames in runs satisfying the preceding-within-range and within-window reappearance rules.</td></tr>
 <tr><td>social_return_interaction_events</td><td>Count of within-range, visibly separated, then within-range-again sequences. Missing-only gaps do not count.</td></tr>
 <tr><td>social_analysis_status</td><td>Explicit calculated/not-applicable/not-calculated interpretation.</td></tr>
-<tr><td>use_social_disappearance_in_calculations</td><td>YES/NO fight switch provenance; default NO.</td></tr>
-<tr><td>social_disappearance_imputed_frames</td><td>Animal-specific number of partner-centroid substitutions used for distance/location calculations.</td></tr>
+<tr><td>use_social_disappearance_in_calculations</td><td>YES/NO fight switch provenance; GUI default YES.</td></tr>
+<tr><td>social_disappearance_imputed_frames</td><td>Animal-specific number of partner-centroid substitutions actually used for distance/location calculations. This is normally zero when the switch is off or no qualifying disappearance occurs.</td></tr>
 <tr><td>remaining_missing_coordinate_frames_after_social_substitution</td><td>Original missing-coordinate frames minus qualifying partner-centroid substitutions; the direct remaining unusable-frame count for distance/location calculations.</td></tr>
 <tr><td>coordinate_frames_used_in_distance_and_location_calculations</td><td>Effective valid-coordinate frame count after any enabled substitutions.</td></tr>
-<tr><td>turtling_candidate_frames</td><td>Valid frames belonging to at least one qualifying tight-loop window; candidate interpretation only.</td></tr>
+<tr><td>turtling_candidate_frames</td><td>Valid frames belonging to at least one qualifying tight-loop window after fight-only fungus exclusion; candidate interpretation only.</td></tr>
+<tr><td>turtling_candidate_proportion_of_detected_frames</td><td>Fungus-excluded candidate frames divided by original valid detected-coordinate frames for that animal in the inclusive analysis window.</td></tr>
 <tr><td>turtling_candidate_events</td><td>Contiguous runs of candidate frames; gaps are not merged.</td></tr>
 <tr><td>turtling_detector_status</td><td>Explicit provisional/calculated or not-calculated status.</td></tr>
 <tr><td>turtling_window_frames</td><td>Sliding candidate-window length; default 120 frames.</td></tr>
@@ -339,6 +353,7 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>result_status, warning</td><td>Explicit interpretation or reason no result was produced.</td></tr>
 <tr><td>trajectory_source_kind</td><td>Exact selected IDtracker source category, including explicit raw fallback categories.</td></tr>
 <tr><td>session_folder, trajectory_file</td><td>Provenance.</td></tr>
+<tr><td>script_version</td><td>Standalone post-processing script version used to generate the row.</td></tr>
 </table>
 <p>The combined batch CSV adds camera, camera ID, video year, recording date,
 recording time, ACT, processing batch ID, and an ISO-8601 processing date/time

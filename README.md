@@ -163,7 +163,8 @@ and farther than 60 pixels, then together within 60 pixels again. A
 missing-only gap is not treated as proof of separation.
 
 The GUI checkbox **Use social disappearance in distance/location
-calculations** defaults to off. When enabled, each qualifying missing animal
+calculations** defaults to on. The user can turn it off before processing.
+When enabled, each qualifying missing animal
 receives the visible partner's centroid for those disappearance frames only.
 The substituted coordinates are used for total distance and primary-wall and
 fungus frame/distance calculations, including movement steps entering and
@@ -183,6 +184,13 @@ window must be valid; sub-pixel steps are excluded as jitter. These six editable
 thresholds are shown in the GUI. Candidate frames and contiguous events are
 reported per animal.
 
+For fights, any otherwise qualifying turtling-candidate frame whose original
+centroid is on or inside `roi_list[1]` (the fungus ROI) is removed before
+candidate frames, proportions, events, and PDF overlays are produced. The
+proportion is candidate frames after this fungus exclusion divided by the
+animal's original valid detected-coordinate frames in the inclusive analysis
+window. BA analyses have no fungus exclusion.
+
 This detector is not a posture classifier: centroid geometry cannot prove that
 a beetle is upside down. It was provisionally checked against three boxed
 positive PDFs and two unboxed comparison PDFs supplied on 2026-07-24. More
@@ -199,3 +207,8 @@ staged as a complete batch; incomplete processing cannot replace the previously
 complete latest batch. Fight PDFs add a distinct social-distance/disappearance
 page. The penultimate page is a translucent wall/fungus buffer audit map, and
 the metadata page is deliberately last for rapid review.
+
+Every CSV row and final PDF metadata page records the standalone script
+version. After a complete batch is successfully promoted, the Mac GUI plays a
+chime and opens an **Everything is done** popup. The popup is not emitted for a
+failed or incomplete batch.

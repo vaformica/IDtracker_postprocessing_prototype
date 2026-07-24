@@ -4,6 +4,25 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.3.0 - 2026-07-24
+
+- Added a completion chime and popup that appears only after the complete CSV
+  and PDF batch has been promoted successfully.
+- Moved `Process checked sessions` to the Sessions tab.
+- Added `script_version` to every per-session and combined CSV row and to the
+  final PDF metadata page.
+- Excluded fight turtling-candidate frames on or inside the secondary fungus
+  ROI from candidate counts, proportions, events, and PDF overlays.
+- Added `turtling_candidate_proportion_of_detected_frames`, defined as the
+  fungus-excluded candidate-frame count divided by original valid detected
+  coordinate frames for that animal in the inclusive analysis window.
+- Clarified that `social_disappearance_imputed_frames` records actual
+  partner-centroid substitutions and is expected to be zero when the optional
+  substitution switch is off.
+- Changed the GUI default so social-disappearance substitution is checked
+  (ON), while retaining explicit per-row provenance and allowing the user to
+  turn it off before processing.
+
 ## 0.2.0 - 2026-07-24
 
 - Added the direct

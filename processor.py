@@ -17,6 +17,8 @@ from pathlib import Path
 import numpy as np
 
 
+SCRIPT_VERSION = "0.3.0"
+
 IDTRACKER_TRAJECTORY_SOURCES = {
     "validated.npy": "IDTRACKER_VALIDATED",
     "without_gaps.npy": "IDTRACKER_WITHOUT_GAPS",
@@ -28,6 +30,7 @@ IDTRACKER_TRAJECTORY_SOURCES = {
 }
 
 OUTPUT_COLUMNS = [
+    "script_version",
     "analysis_start_global_frame",
     "analysis_timespan_frames",
     "analysis_end_global_frame_inclusive",
@@ -63,6 +66,7 @@ OUTPUT_COLUMNS = [
     "remaining_missing_coordinate_frames_after_social_substitution",
     "coordinate_frames_used_in_distance_and_location_calculations",
     "turtling_candidate_frames",
+    "turtling_candidate_proportion_of_detected_frames",
     "turtling_candidate_events",
     "turtling_detector_status",
     "turtling_window_frames",
@@ -362,6 +366,50 @@ def compute_social_candidates(
     }
 
 
+def _events_from_mask(mask: np.ndarray) -> list[dict]:
+    """Return contiguous inclusive event runs for one Boolean frame mask."""
+    changes = np.diff(
+        np.concatenate(([False], mask, [False])).astype(np.int8)
+    )
+    starts = np.flatnonzero(changes == 1)
+    stops = np.flatnonzero(changes == -1)
+    return [
+        {
+            "start_offset": int(event_start),
+            "end_offset": int(event_stop - 1),
+            "frames": int(event_stop - event_start),
+        }
+        for event_start, event_stop in zip(starts, stops)
+    ]
+
+
+def exclude_turtling_candidates_on_fungus(
+    result: dict,
+    xy: np.ndarray,
+    fungus_roi: np.ndarray | None,
+) -> dict:
+    """Remove fight turtling candidates whose centroid is on the fungus ROI.
+
+    This changes only the turtling candidate mask and its contiguous events.
+    It does not alter coordinates or any distance, wall, fungus, or social
+    calculation.
+    """
+    adjusted = dict(result)
+    mask = np.asarray(result["mask"], dtype=bool).copy()
+    excluded = np.zeros(len(mask), dtype=bool)
+    if fungus_roi is not None and mask.any():
+        xy = np.asarray(xy, dtype=float)
+        valid = np.isfinite(xy).all(axis=1)
+        on_fungus = np.zeros(len(mask), dtype=bool)
+        on_fungus[valid] = points_inside_polygon(xy[valid], fungus_roi)
+        excluded = mask & on_fungus
+        mask[excluded] = False
+    adjusted["mask"] = mask
+    adjusted["events"] = _events_from_mask(mask)
+    adjusted["fungus_excluded_mask"] = excluded
+    return adjusted
+
+
 def compute_turtling_candidates(
     xy: np.ndarray,
     window_frames: int = 120,
@@ -446,22 +494,9 @@ def compute_turtling_candidates(
 
         candidate_mask[start_offset:stop_offset] |= valid
 
-    changes = np.diff(
-        np.concatenate(([False], candidate_mask, [False])).astype(np.int8)
-    )
-    starts = np.flatnonzero(changes == 1)
-    stops = np.flatnonzero(changes == -1)
-    events = [
-        {
-            "start_offset": int(event_start),
-            "end_offset": int(event_stop - 1),
-            "frames": int(event_stop - event_start),
-        }
-        for event_start, event_stop in zip(starts, stops)
-    ]
     return {
         "mask": candidate_mask,
-        "events": events,
+        "events": _events_from_mask(candidate_mask),
         "status": "CALCULATED_PROVISIONAL_CENTROID_PATH_CANDIDATES",
     }
 
@@ -558,14 +593,18 @@ def analyze(
                 impute_mask.sum()
             )
     turtling_by_animal = [
-        compute_turtling_candidates(
+        exclude_turtling_candidates_on_fungus(
+            compute_turtling_candidates(
+                window_arr[:, animal, :],
+                window_frames=turtling_window_frames,
+                min_path_px=turtling_min_path_px,
+                max_radius90_px=turtling_max_radius90_px,
+                min_turn_rotations=turtling_min_turn_rotations,
+                max_straightness=turtling_max_straightness,
+                max_step_px=turtling_max_step_px,
+            ),
             window_arr[:, animal, :],
-            window_frames=turtling_window_frames,
-            min_path_px=turtling_min_path_px,
-            max_radius90_px=turtling_max_radius90_px,
-            min_turn_rotations=turtling_min_turn_rotations,
-            max_straightness=turtling_max_straightness,
-            max_step_px=turtling_max_step_px,
+            secondary_roi,
         )
         for animal in range(window_arr.shape[1])
     ]
@@ -679,6 +718,11 @@ def analyze(
         turtling_result = turtling_by_animal[individual]
         turtling_candidate_frames = int(
             turtling_result["mask"].sum()
+        )
+        turtling_candidate_proportion = (
+            float(turtling_candidate_frames / int(original_valid.sum()))
+            if original_valid.any()
+            else ""
         )
         turtling_candidate_events = len(turtling_result["events"])
         if turtling_candidate_frames:
@@ -914,6 +958,7 @@ def analyze(
 
         output.append(
             {
+                "script_version": SCRIPT_VERSION,
                 "analysis_start_global_frame": start,
                 "analysis_timespan_frames": window,
                 "analysis_end_global_frame_inclusive": end_inclusive,
@@ -965,6 +1010,9 @@ def analyze(
                     int(valid.sum())
                 ),
                 "turtling_candidate_frames": turtling_candidate_frames,
+                "turtling_candidate_proportion_of_detected_frames": (
+                    turtling_candidate_proportion
+                ),
                 "turtling_candidate_events": turtling_candidate_events,
                 "turtling_detector_status": turtling_result["status"],
                 "turtling_window_frames": turtling_window_frames,
@@ -1034,34 +1082,40 @@ def write_plot_pdf(
         str(rows[0].get("use_social_disappearance_in_calculations", "NO"))
         == "YES"
     )
-    turtling_by_animal = [
-        compute_turtling_candidates(
-            window_arr[:, animal, :],
-            window_frames=int(rows[animal]["turtling_window_frames"]),
-            min_path_px=float(rows[animal]["turtling_min_path_px"]),
-            max_radius90_px=float(
-                rows[animal]["turtling_max_radius90_px"]
-            ),
-            min_turn_rotations=float(
-                rows[animal]["turtling_min_turn_rotations"]
-            ),
-            max_straightness=float(
-                rows[animal]["turtling_max_straightness"]
-            ),
-            max_step_px=float(rows[animal]["turtling_max_step_px"]),
-        )
-        for animal in range(window_arr.shape[1])
-    ]
     try:
         rois = load_rois(session_folder)
     except Exception:
         rois = []
+    fungus_roi = rois[1] if is_fight and len(rois) > 1 else None
+    turtling_by_animal = [
+        exclude_turtling_candidates_on_fungus(
+            compute_turtling_candidates(
+                window_arr[:, animal, :],
+                window_frames=int(rows[animal]["turtling_window_frames"]),
+                min_path_px=float(rows[animal]["turtling_min_path_px"]),
+                max_radius90_px=float(
+                    rows[animal]["turtling_max_radius90_px"]
+                ),
+                min_turn_rotations=float(
+                    rows[animal]["turtling_min_turn_rotations"]
+                ),
+                max_straightness=float(
+                    rows[animal]["turtling_max_straightness"]
+                ),
+                max_step_px=float(rows[animal]["turtling_max_step_px"]),
+            ),
+            window_arr[:, animal, :],
+            fungus_roi,
+        )
+        for animal in range(window_arr.shape[1])
+    ]
     colors = ["#0072B2", "#D55E00", "#009E73", "#CC79A7"]
     video_name = Path(video).name
     page_video = f"Video: {video_name}"
     page_context = (
         f"Cell: {cell_label}    |    "
-        f"Trajectory: {rows[0]['trajectory_source_kind']}"
+        f"Trajectory: {rows[0]['trajectory_source_kind']}    |    "
+        f"Script: v{rows[0]['script_version']}"
     )
     if qc_record_id:
         page_context += f"    |    QC record: {qc_record_id}"
@@ -1488,6 +1542,7 @@ def write_plot_pdf(
         add_page_identity(fig)
         fig.suptitle("IDtracker analysis-window metadata", fontsize=16, y=0.925)
         summary_lines = [
+            f"Post-processing script version: {rows[0]['script_version']}",
             f"Video: {video_name}",
             f"Cell: {cell_label}",
             f"QC record: {qc_record_id or 'not supplied'}",
@@ -1512,10 +1567,11 @@ def write_plot_pdf(
                 f"max step <= {rows[0]['turtling_max_step_px']} px"
             ),
             (
-                "Turtling candidate frames/events by animal: "
+                "Turtling candidate frames/proportion/events by animal: "
                 + "; ".join(
                     f"{row['idtracker_animal_id']}="
                     f"{row['turtling_candidate_frames']}/"
+                    f"{float(row['turtling_candidate_proportion_of_detected_frames']):.6f}/"
                     f"{row['turtling_candidate_events']}"
                     for row in rows
                 )
@@ -1525,6 +1581,11 @@ def write_plot_pdf(
             summary_lines.extend(
                 [
                     f"Fungus edge buffer: {rows[0]['fungus_buffer_px']} pixels inward",
+                    (
+                        "Turtling rule for fights: candidate frames on or "
+                        "inside the fungus ROI are excluded from CSV counts, "
+                        "proportions, events, and PDF overlays."
+                    ),
                     (
                         "Social distance threshold: <= "
                         f"{rows[0]['social_distance_threshold_px']} pixels"
