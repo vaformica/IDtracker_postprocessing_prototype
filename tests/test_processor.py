@@ -80,7 +80,8 @@ class ProcessorTests(unittest.TestCase):
             )
             self.assertEqual(paths["completed_folder"], completed)
             self.assertEqual(
-                paths["partial_csv"].name, "combined_results.csv"
+                paths["partial_csv"].name,
+                "combined_results_20260724_220000_123456.csv",
             )
             self.assertEqual(paths["partial_pdfs"].name, "pdfs")
             self.assertEqual(

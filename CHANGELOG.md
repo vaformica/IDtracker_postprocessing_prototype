@@ -4,6 +4,13 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.5.4 - 2026-07-24
+
+- Added the processing-batch date and time to the automatically downloaded CSV
+  filename: `combined_results_YYYYMMDD_HHMMSS_microseconds.csv`.
+- The CSV filename timestamp now exactly matches its enclosing
+  `completed_run_YYYYMMDD_HHMMSS_microseconds/` folder.
+
 ## 0.5.3 - 2026-07-24
 
 - Clarified automatic Mac downloads: every successful run creates

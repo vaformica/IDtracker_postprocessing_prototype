@@ -474,7 +474,7 @@ def automatic_download_paths(token: str, home: Path | None = None) -> dict:
         "root": local_root,
         "completed_folder": completed_folder,
         "partial_folder": partial_folder,
-        "partial_csv": partial_folder / "combined_results.csv",
+        "partial_csv": partial_folder / f"combined_results_{token}.csv",
         "partial_pdfs": partial_folder / "pdfs",
     }
 

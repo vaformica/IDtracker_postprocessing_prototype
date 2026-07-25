@@ -112,7 +112,9 @@ one timestamped completed-run folder under:
 `~/Downloads/IDtracker_postprocessing_results/completed_run_YYYYMMDD_HHMMSS_microseconds/`
 
 That folder contains
-`combined_results.csv` and `pdfs/`. The entire folder is first staged under a
+`combined_results_YYYYMMDD_HHMMSS_microseconds.csv` and `pdfs/`. The timestamp
+in the CSV filename is the same processing-batch timestamp used by its enclosing
+completed-run folder. The entire folder is first staged under a
 hidden `.partial` name and becomes visible only after both the CSV and all PDFs
 finish downloading. The manual download buttons remain available.
 
