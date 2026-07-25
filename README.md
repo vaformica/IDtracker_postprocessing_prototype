@@ -57,12 +57,14 @@ connection form. Its default is
 `~/miniconda3/envs/idtracker_reprocess_v1/bin/python`. Tkinter is required only
 on the Mac.
 
-The interface is divided into four tabs:
+The interface is divided into five tabs:
 
 - **Setup & Run** contains the SSH connection, scientific parameters, process
-  settings, and result downloads.
+  settings, and Firebird execution settings.
 - **Sessions** contains the full approved-session table, filters, start-time
   tools, process button, and trajectory report.
+- **Results & Downloads** reports automatic-download progress and contains
+  manual CSV/PDF recovery buttons.
 - **Jump Audit** contains video-level BA and fight disturbance results and the
   explicit approval button for suggested replacement starts.
 - **Logs & Diagnostics** contains live SSH progress and diagnostic tools.
@@ -95,7 +97,9 @@ Workflow:
 10. Confirm the inclusive 7200-frame timespan (`end - start`), 30-pixel
    displacement threshold, both ROI-buffer widths, and the fight social
    distance threshold (default 60 pixels).
-11. Process, then download the combined CSV and PDF plot folder.
+11. Process. After successful remote completion, leave the GUI open while it
+    automatically downloads and verifies the timestamped CSV/PDF folder. The
+    final chime and popup identify the completed Mac folder.
 
 Reusable JSON files default to
 `~/Downloads/IDtracker_postprocessing_results/saved_settings/`. They store the
@@ -135,8 +139,13 @@ That folder contains
 `combined_results_YYYYMMDD_HHMMSS_microseconds.csv` and `pdfs/`. The timestamp
 in the CSV filename is the same processing-batch timestamp used by its enclosing
 completed-run folder. The entire folder is first staged under a
-hidden `.partial` name and becomes visible only after both the CSV and all PDFs
-finish downloading. The manual download buttons remain available.
+hidden `.partial` name. Firebird packages all PDFs into one uncompressed ZIP
+for transfer, because the already-compressed PDFs are much faster to move as
+one file than as hundreds of recursive `scp` members. The Mac accepts only
+flat `.pdf` archive members, verifies the expected count, extracts them into
+`pdfs/`, removes the temporary ZIP, and makes the completed-run folder visible
+only after both the CSV and verified PDFs are present. The manual recovery
+download buttons are in the separate **Results & Downloads** tab.
 
 In the combined CSV, `cell_label`, `video`, and `analysis_type` (fight or BA)
 are deliberately the first three columns. `video_year` is fourth and is parsed
@@ -301,17 +310,20 @@ overlays so the original track remains visible.
 Processing creates one multipage PDF per session under the remote
 `combined_results_latest_pdfs` folder. Every page includes the full video
 filename, cell, accepted trajectory-source category, and QC record provenance.
-The GUI's **Download PDFs from this run** button copies
-those PDFs to a folder selected on the Mac. The combined CSV and PDF folder are
-staged as a complete batch; incomplete processing cannot replace the previously
-complete latest batch. Fight PDFs add a distinct social-distance/disappearance
-page. The penultimate page is a translucent wall/fungus buffer audit map, and
-the metadata page is deliberately last for rapid review.
+The GUI automatically transfers those PDFs in one archive after a successful
+run. The **Results & Downloads** tab retains manual CSV and PDF recovery
+buttons. The combined CSV and PDF folder are staged as a complete batch;
+incomplete processing cannot replace the previously complete latest batch.
+Fight PDFs add a distinct social-distance/disappearance page. The penultimate
+page is a translucent wall/fungus buffer audit map, and the metadata page is
+deliberately last for rapid review.
 
 Every CSV row and final PDF metadata page records the standalone script
-version. After a complete batch is successfully promoted, the Mac GUI plays a
-chime and opens an **Everything is done** popup. The popup is not emitted for a
-failed or incomplete batch.
+version. Remote processing completion begins the automatic download but does
+not produce the final alert. Only after the CSV is present, the PDF archive has
+been downloaded and verified, and the local completed-run folder has been
+promoted does the Mac GUI play a chime and open a **Download complete** popup.
+The popup is not emitted for a failed, incomplete, or partial download.
 
 ## SLURM execution for large batches
 

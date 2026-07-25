@@ -13,7 +13,7 @@ table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8
 </style>
 </head>
 <body>
-<h1>Standalone IDtracker.ai post-processing: version 0.7.0</h1>
+<h1>Standalone IDtracker.ai post-processing: version 0.7.1</h1>
 <p>This document describes every calculation performed by <code>processor.py</code>.
 The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
 
@@ -486,8 +486,11 @@ complete batch. If any task fails, is cancelled, times out, or does not produce
 its expected files, the finalizer fails without replacing the prior complete
 outputs.</p>
 <p>The GUI log records the array and finalizer job IDs and displays completed
-task counts while it remains open. The audible/visible completion alert occurs
-only after the finalizer writes its success marker. Combined rows record
+task counts while it remains open. The finalizer success marker starts the
+automatic Mac transfer but does not trigger the final chime. The
+audible/visible completion alert occurs only after the CSV and verified PDF
+collection have been downloaded and promoted into the visible local
+completed-run folder. Combined rows record
 <code>processing_execution_mode</code> as <code>SLURM_ARRAY</code> or
 <code>DIRECT_SSH</code>.</p>
 
@@ -653,11 +656,17 @@ date and is currently populated only for recognized 2025 or 2026 names.</p>
 
 <h2>Automatic Mac output copies</h2>
 <p>After a complete remote batch is promoted, the GUI automatically downloads
-the matching CSV and PDF folder to
+the matching CSV and PDF collection to
 <code>~/Downloads/IDtracker_postprocessing_results</code>. Both names contain
-the same processing timestamp. Downloads are first staged with hidden
-<code>.partial</code> names; neither becomes the final timestamped item until
-both transfers finish.</p>
+the same processing timestamp. To avoid recursive per-file transfer overhead,
+Firebird first writes one atomic ZIP archive containing the already-compressed
+PDFs without applying additional compression. The Mac downloads that single
+archive, rejects nested, non-PDF, or count-mismatched contents, extracts the
+verified files, and deletes the temporary ZIP. Downloads are staged under one
+hidden <code>.partial</code> completed-run folder, which is renamed to its
+visible final name only after the CSV and every expected PDF are present. The
+final chime and popup occur after this local rename, not merely after SLURM
+finishes.</p>
 
 <h2>GUI start-review statuses</h2>
 <table>

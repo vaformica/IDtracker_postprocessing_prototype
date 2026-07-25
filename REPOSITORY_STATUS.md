@@ -20,6 +20,9 @@ This repository is the standalone IDtracker post-processing prototype.
   opportunity-adjusted post-wake measures.
 - `v0.7.0` adds the fixed 3600-interval post-wake comparison block, using each
   BA animal's wake or the later of both fight-animal wakes.
+- `v0.7.1` transfers PDFs as one verified archive, moves the final alert to
+  local-download completion, and reflows GUI actions for laptop widths without
+  changing the scientific schema.
 
-The automated suite contains 55 tests. Firebird execution remains a separate
+The automated suite contains 57 tests. Firebird execution remains a separate
 validation step and is not implied by local test success.

@@ -4,6 +4,26 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.7.1 - 2026-07-25
+
+- Replaced recursive PDF-folder transfer with one atomic, uncompressed ZIP
+  archive built on Firebird. PDFs are already compressed, so stored ZIP avoids
+  unnecessary compression time while removing per-file network overhead.
+- Added safe Mac extraction that accepts only flat `.pdf` members, verifies the
+  Firebird-reported PDF count, and removes the temporary archive before the
+  hidden completed-run folder is promoted.
+- Moved the final chime and popup from remote-processing completion to verified
+  Mac-download completion. The popup now reports the completed local folder
+  and extracted PDF count.
+- Added explicit download-failure state handling without promoting partial
+  results.
+- Added a dedicated **Results & Downloads** tab and moved both manual recovery
+  download buttons there.
+- Reflowed Sessions and Jump Audit action buttons across multiple rows and
+  reduced the default/minimum window widths for laptop displays.
+- Added archive creation, extraction, count-mismatch, and unsafe-member tests.
+- Scientific calculations and the v0.7.0 output schema are unchanged.
+
 ## 0.7.0 - 2026-07-25
 
 - Retained every existing variable-length `post_wake_*` output from wake

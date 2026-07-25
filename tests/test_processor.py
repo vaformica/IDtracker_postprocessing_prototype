@@ -5,6 +5,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 
 import numpy as np
@@ -27,8 +28,10 @@ from firebird_gui import (
     App,
     BATCH_SESSION_RESOLVER,
     COMBINE_RESULTS,
+    REMOTE_PDF_ARCHIVE_CODE,
     TRAJECTORY_NAMES,
     automatic_download_paths,
+    extract_pdf_archive,
     KNOWN_START_REVIEW_STEMS,
     make_missing_start_report,
     make_missing_trajectory_report,
@@ -38,6 +41,7 @@ from firebird_gui import (
     normalized_video_name,
     jump_audit_start_for_record,
     parse_video_fields,
+    remote_pdf_archive_path,
     saved_start_decisions,
     settings_bundle_from_combined_rows,
     settings_bundle_from_jump_audit_rows,
@@ -244,9 +248,80 @@ class ProcessorTests(unittest.TestCase):
             )
             self.assertEqual(paths["partial_pdfs"].name, "pdfs")
             self.assertEqual(
+                paths["partial_pdf_archive"].name,
+                ".pdfs_download.zip",
+            )
+            self.assertEqual(
                 paths["partial_folder"].name,
                 ".completed_run_20260724_220000_123456.partial",
             )
+
+    def test_pdf_archive_path_and_verified_extraction(self):
+        compile(
+            REMOTE_PDF_ARCHIVE_CODE,
+            "<remote-pdf-archive>",
+            "exec",
+        )
+        self.assertEqual(
+            remote_pdf_archive_path(
+                "/home/reprocess/combined_results_latest_pdfs/"
+            ),
+            "/home/reprocess/combined_results_latest_pdfs.zip",
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            remote_pdfs = root / "remote_pdfs"
+            remote_pdfs.mkdir()
+            (remote_pdfs / "00001__A1.pdf").write_bytes(b"%PDF-1.4\none")
+            (remote_pdfs / "00002__A2.pdf").write_bytes(b"%PDF-1.4\ntwo")
+            archive_path = root / "plots.zip"
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    "-c",
+                    REMOTE_PDF_ARCHIVE_CODE,
+                    str(remote_pdfs),
+                    str(archive_path),
+                ],
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            report = json.loads(result.stdout)
+            self.assertEqual(report["pdf_count"], 2)
+            self.assertEqual(report["archive"], str(archive_path))
+            destination = root / "pdfs"
+            count = extract_pdf_archive(
+                archive_path, destination, expected_count=2
+            )
+            self.assertEqual(count, 2)
+            self.assertEqual(
+                sorted(path.name for path in destination.glob("*.pdf")),
+                ["00001__A1.pdf", "00002__A2.pdf"],
+            )
+
+    def test_pdf_archive_extraction_rejects_unsafe_or_wrong_members(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            unsafe = root / "unsafe.zip"
+            with zipfile.ZipFile(unsafe, "w") as archive:
+                archive.writestr("../outside.pdf", b"%PDF")
+            with self.assertRaisesRegex(ValueError, "unsafe or unexpected"):
+                extract_pdf_archive(
+                    unsafe, root / "unsafe_output", expected_count=1
+                )
+            self.assertFalse((root / "unsafe_output").exists())
+
+            wrong_count = root / "wrong_count.zip"
+            with zipfile.ZipFile(wrong_count, "w") as archive:
+                archive.writestr("only.pdf", b"%PDF")
+            with self.assertRaisesRegex(ValueError, "count does not match"):
+                extract_pdf_archive(
+                    wrong_count,
+                    root / "wrong_count_output",
+                    expected_count=2,
+                )
+            self.assertFalse((root / "wrong_count_output").exists())
 
     def test_gui_and_processor_accept_exactly_the_same_source_names(self):
         self.assertEqual(

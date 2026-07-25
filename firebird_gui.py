@@ -14,6 +14,7 @@ import subprocess
 import sys
 import threading
 import time
+import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
 import tkinter as tk
@@ -51,6 +52,50 @@ INTERVAL_KEYS = {
     "analysis_interval",
     "analysis_intervals",
 }
+
+REMOTE_PDF_ARCHIVE_CODE = r"""
+import json
+import os
+import sys
+import zipfile
+from pathlib import Path
+
+source = Path(sys.argv[1])
+destination = Path(sys.argv[2])
+if not source.is_dir():
+    raise RuntimeError(f"PDF folder is missing: {source}")
+pdfs = sorted(source.glob("*.pdf"))
+if not pdfs:
+    raise RuntimeError(f"No PDFs found under {source}")
+temporary = destination.with_name(
+    destination.name + f".partial.{os.getpid()}"
+)
+if temporary.exists():
+    temporary.unlink()
+try:
+    with zipfile.ZipFile(
+        temporary,
+        "w",
+        compression=zipfile.ZIP_STORED,
+        allowZip64=True,
+    ) as archive:
+        for pdf in pdfs:
+            archive.write(pdf, arcname=pdf.name)
+    temporary.replace(destination)
+except Exception:
+    if temporary.exists():
+        temporary.unlink()
+    raise
+print(
+    json.dumps(
+        {
+            "archive": str(destination),
+            "pdf_count": len(pdfs),
+            "bytes": destination.stat().st_size,
+        }
+    )
+)
+"""
 
 BATCH_SESSION_RESOLVER = r"""
 import json
@@ -939,7 +984,62 @@ def automatic_download_paths(token: str, home: Path | None = None) -> dict:
         "partial_folder": partial_folder,
         "partial_csv": partial_folder / f"combined_results_{token}.csv",
         "partial_pdfs": partial_folder / "pdfs",
+        "partial_pdf_archive": partial_folder / ".pdfs_download.zip",
     }
+
+
+def remote_pdf_archive_path(remote_pdf_folder: str) -> str:
+    """Return the derived, replaceable archive beside a remote PDF folder."""
+    return remote_pdf_folder.rstrip("/") + ".zip"
+
+
+def extract_pdf_archive(
+    archive_path: Path,
+    destination: Path,
+    *,
+    expected_count: int,
+) -> int:
+    """Safely extract one flat PDF-only archive and verify its file count."""
+    archive_path = Path(archive_path)
+    destination = Path(destination)
+    if expected_count <= 0:
+        raise ValueError("Expected PDF count must be positive")
+    if destination.exists():
+        raise FileExistsError(
+            f"Refusing to extract over an existing PDF folder: {destination}"
+        )
+    with zipfile.ZipFile(archive_path, "r") as archive:
+        members = archive.infolist()
+        if len(members) != expected_count:
+            raise ValueError(
+                "PDF archive count does not match Firebird packaging report: "
+                f"{len(members)} versus {expected_count}"
+            )
+        for member in members:
+            member_path = Path(member.filename)
+            if (
+                member.is_dir()
+                or member_path.name != member.filename
+                or member_path.suffix.lower() != ".pdf"
+            ):
+                raise ValueError(
+                    "PDF archive contains an unsafe or unexpected member: "
+                    f"{member.filename!r}"
+                )
+        destination.mkdir(parents=True)
+        try:
+            archive.extractall(destination)
+        except Exception:
+            shutil.rmtree(destination, ignore_errors=True)
+            raise
+    extracted = list(destination.glob("*.pdf"))
+    if len(extracted) != expected_count:
+        shutil.rmtree(destination, ignore_errors=True)
+        raise ValueError(
+            "Extracted PDF count does not match Firebird packaging report: "
+            f"{len(extracted)} versus {expected_count}"
+        )
+    return len(extracted)
 
 
 def jump_audit_start_for_record(record: dict) -> tuple[int, str] | None:
@@ -978,8 +1078,8 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title("Firebird IDtracker Post-processing — Minimal Scientific Review")
-        self.geometry("1250x820")
-        self.minsize(900, 650)
+        self.geometry("1100x780")
+        self.minsize(780, 620)
         self.work = queue.Queue()
         self.rows = {}
         self._build()
@@ -1002,6 +1102,8 @@ class App(tk.Tk):
         self.last_plot_remote = ""
         self.current_batch_token = ""
         self.auto_download_started_for = ""
+        self.auto_download_in_progress = False
+        self.last_processing_summary = {}
         self.all_records = []
         self.filtered_records = []
         self.jump_audit_summaries = []
@@ -1017,10 +1119,12 @@ class App(tk.Tk):
         self.notebook.pack(fill="both", expand=True, padx=10, pady=8)
         self.setup_tab = ttk.Frame(self.notebook)
         self.sessions_tab = ttk.Frame(self.notebook)
+        self.results_tab = ttk.Frame(self.notebook)
         self.jump_audit_tab = ttk.Frame(self.notebook)
         self.logs_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.setup_tab, text="Setup & Run")
         self.notebook.add(self.sessions_tab, text="Sessions")
+        self.notebook.add(self.results_tab, text="Results & Downloads")
         self.notebook.add(self.jump_audit_tab, text="Jump Audit")
         self.notebook.add(self.logs_tab, text="Logs & Diagnostics")
 
@@ -1049,8 +1153,13 @@ class App(tk.Tk):
             saved_settings,
             textvariable=self.saved_settings_status,
             anchor="w",
-        ).grid(row=0, column=2, sticky="ew", padx=8, pady=6)
-        saved_settings.columnconfigure(2, weight=1)
+            justify="left",
+            wraplength=820,
+        ).grid(
+            row=1, column=0, columnspan=2,
+            sticky="ew", padx=8, pady=(0, 6),
+        )
+        saved_settings.columnconfigure(1, weight=1)
 
         connection = ttk.LabelFrame(
             self.setup_tab,
@@ -1231,23 +1340,33 @@ class App(tk.Tk):
         )
 
         results = ttk.LabelFrame(
-            self.setup_tab,
-            text="5. Results from the latest completed processing run",
+            self.results_tab,
+            text="Results from the latest completed processing run",
         )
-        results.pack(fill="x", padx=10, pady=4)
+        results.pack(fill="x", padx=10, pady=10)
         self.results_status = tk.StringVar(
-            value="After processing, download the matching CSV and PDF folder here."
+            value=(
+                "After processing, the matching CSV and PDF folder download "
+                "automatically into IDtracker_postprocessing_results."
+            )
         )
         ttk.Label(
-            results, textvariable=self.results_status, anchor="w"
-        ).grid(row=0, column=0, columnspan=2, sticky="ew", padx=8, pady=(5, 2))
+            results,
+            textvariable=self.results_status,
+            anchor="w",
+            justify="left",
+            wraplength=850,
+        ).grid(
+            row=0, column=0, columnspan=2,
+            sticky="ew", padx=8, pady=(7, 5),
+        )
         self.download_button = ttk.Button(
             results,
             text="Download CSV from this run",
             command=self.download_combined,
         )
         self.download_button.grid(
-            row=1, column=0, sticky="w", padx=8, pady=(2, 8)
+            row=1, column=0, sticky="w", padx=8, pady=(2, 5)
         )
         self.plot_download_button = ttk.Button(
             results,
@@ -1255,9 +1374,20 @@ class App(tk.Tk):
             command=self.download_plot_folder,
         )
         self.plot_download_button.grid(
-            row=1, column=1, sticky="w", padx=8, pady=(2, 8)
+            row=2, column=0, sticky="w", padx=8, pady=(2, 8)
         )
-        results.columnconfigure(2, weight=1)
+        results.columnconfigure(0, weight=1)
+        ttk.Label(
+            self.results_tab,
+            text=(
+                "Automatic runs download one PDF ZIP archive from Firebird, "
+                "verify and extract it locally, then display the final chime "
+                "and popup. Manual buttons are retained for recovery."
+            ),
+            anchor="w",
+            justify="left",
+            wraplength=850,
+        ).pack(fill="x", padx=18, pady=(0, 8))
 
         sessions_tab = self.sessions_tab
         logs_tab = self.logs_tab
@@ -1332,31 +1462,31 @@ class App(tk.Tk):
             start_file_bar,
             text="Export sessions needing start times",
             command=self.export_missing_start_report,
-        ).grid(row=0, column=0, sticky="w", padx=4, pady=2)
+        ).grid(row=1, column=0, sticky="w", padx=4, pady=2)
         ttk.Button(
             start_file_bar,
             text="Import completed start-time CSV",
             command=self.import_start_report,
-        ).grid(row=0, column=1, sticky="w", padx=4, pady=2)
+        ).grid(row=1, column=1, sticky="w", padx=4, pady=2)
         ttk.Button(
             start_file_bar,
             text="Explain start statuses",
             command=lambda: messagebox.showinfo(
                 "Start-frame review statuses", START_STATUS_HELP
             ),
-        ).grid(row=1, column=0, sticky="w", padx=4, pady=2)
+        ).grid(row=1, column=2, sticky="w", padx=4, pady=2)
         ttk.Button(
             start_file_bar,
             text="Export sessions with no trajectory file",
             command=self.export_missing_trajectory_report,
-        ).grid(row=1, column=1, sticky="w", padx=4, pady=2)
+        ).grid(row=2, column=0, sticky="w", padx=4, pady=2)
         self.process_button = ttk.Button(
             start_file_bar,
             text="Process checked sessions",
             command=self.process,
         )
         self.process_button.grid(
-            row=0, column=2, rowspan=2, sticky="nsw", padx=(18, 4), pady=2
+            row=0, column=0, sticky="w", padx=4, pady=2
         )
         ttk.Label(
             start_file_bar,
@@ -1364,26 +1494,32 @@ class App(tk.Tk):
                 "The process button uses every row marked Yes in the "
                 "Process? column."
             ),
-        ).grid(row=0, column=3, rowspan=2, sticky="w", padx=4, pady=2)
+            justify="left",
+            wraplength=760,
+        ).grid(
+            row=3, column=0, columnspan=3,
+            sticky="ew", padx=4, pady=(2, 4),
+        )
         ttk.Button(
             start_file_bar,
             text="Check all filtered ready sessions",
             command=self.check_all_filtered_ready,
-        ).grid(row=2, column=0, sticky="w", padx=4, pady=(4, 2))
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=2)
         ttk.Button(
             start_file_bar,
             text="Uncheck all sessions",
             command=self.uncheck_all_sessions,
-        ).grid(row=2, column=1, sticky="w", padx=4, pady=(4, 2))
+        ).grid(row=0, column=2, sticky="w", padx=4, pady=2)
         self.jump_audit_button = ttk.Button(
             start_file_bar,
             text="Audit jumps in all approved BA + fights",
             command=self.run_jump_audit,
         )
         self.jump_audit_button.grid(
-            row=2, column=2, sticky="w", padx=(18, 4), pady=(4, 2)
+            row=2, column=1, columnspan=2,
+            sticky="w", padx=4, pady=2,
         )
-        start_file_bar.columnconfigure(3, weight=1)
+        start_file_bar.columnconfigure(2, weight=1)
 
         columns = (
             "use", "trajectory_status", "status", "start", "video_name", "camera",
@@ -1456,17 +1592,18 @@ class App(tk.Tk):
             audit_controls,
             text="Run audit on all approved BA + fights",
             command=self.run_jump_audit,
-        ).pack(side="left", padx=4)
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=3)
         ttk.Button(
             audit_controls,
             text="Approve selected start recommendation",
             command=self.approve_jump_recommendation,
-        ).pack(side="left", padx=4)
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=3)
         ttk.Button(
             audit_controls,
             text="Export audit and decisions",
             command=self.export_jump_audit,
-        ).pack(side="left", padx=4)
+        ).grid(row=1, column=0, sticky="w", padx=4, pady=3)
+        audit_controls.columnconfigure(2, weight=1)
         self.jump_audit_status = tk.StringVar(
             value=(
                 "Run the read-only audit after scanning. No start changes are "
@@ -1590,6 +1727,40 @@ class App(tk.Tk):
     def ssh(self):
         return SSH(self.host.get().strip(), self.key.get().strip())
 
+    def _prepare_remote_pdf_archive(self, remote_pdf_folder):
+        """Atomically package the latest remote PDFs as one stored ZIP file."""
+        ssh = self.ssh()
+        remote_home = ssh.run('printf "%s" "$HOME"').strip()
+        remote_python = expand_remote_path(
+            self.remote_python.get(), remote_home
+        )
+        archive_path = remote_pdf_archive_path(remote_pdf_folder)
+        self.log(
+            f"Packaging {remote_pdf_folder} as one transfer archive on "
+            "Firebird."
+        )
+        output = ssh.run(
+            f"{shlex.quote(remote_python)} -c "
+            f"{shlex.quote(REMOTE_PDF_ARCHIVE_CODE)} "
+            f"{shlex.quote(remote_pdf_folder)} "
+            f"{shlex.quote(archive_path)}",
+            timeout=1800,
+        ).strip()
+        payload = json.loads(output)
+        if (
+            payload.get("archive") != archive_path
+            or int(payload.get("pdf_count", 0)) <= 0
+            or int(payload.get("bytes", 0)) <= 0
+        ):
+            raise RuntimeError(
+                f"Firebird returned an invalid PDF archive report: {payload}"
+            )
+        self.log(
+            f"Firebird PDF archive ready: {payload['pdf_count']} PDF(s), "
+            f"{int(payload['bytes']) / (1024 * 1024):.1f} MiB."
+        )
+        return payload
+
     def _background(self, function):
         threading.Thread(target=lambda: self._run_guarded(function), daemon=True).start()
 
@@ -1634,10 +1805,15 @@ class App(tk.Tk):
                 elif kind == "processing_done":
                     self.processing_running = False
                     self.process_button.configure(state="normal")
-                    self.download_button.configure(state="normal")
-                    self.plot_download_button.configure(state="normal")
+                    if not self.auto_download_in_progress:
+                        self.download_button.configure(state="normal")
+                        self.plot_download_button.configure(state="normal")
                 elif kind == "processing_complete":
-                    self._completion_alert(payload)
+                    self.last_processing_summary = dict(payload)
+                    self.results_status.set(
+                        "Firebird processing is complete. The automatic Mac "
+                        "download is still running."
+                    )
                 elif kind == "combined_ready":
                     self.last_combined_remote = payload
                     self.download_button.configure(state="normal")
@@ -1655,10 +1831,24 @@ class App(tk.Tk):
                         "batch. The buttons can still locate the previous run."
                     )
                 elif kind == "auto_download_complete":
+                    self.auto_download_in_progress = False
+                    self.download_button.configure(state="normal")
+                    self.plot_download_button.configure(state="normal")
                     self.results_status.set(
                         f"CSV and PDF folder automatically saved on this Mac: "
-                        f"{payload}"
+                        f"{payload['folder']}"
                     )
+                    self._download_completion_alert(payload)
+                elif kind == "auto_download_failed":
+                    self.auto_download_in_progress = False
+                    self.download_button.configure(state="normal")
+                    self.plot_download_button.configure(state="normal")
+                    self.results_status.set(
+                        "Firebird processing completed, but the automatic Mac "
+                        "download stopped with an error. See Logs & Diagnostics."
+                    )
+                elif kind == "manual_pdf_download_complete":
+                    self._download_completion_alert(payload)
                 elif kind == "prompt_plot_download":
                     self.last_plot_remote = payload
                     self._prompt_plot_folder(payload)
@@ -1674,8 +1864,8 @@ class App(tk.Tk):
             pass
         self.after(100, self._poll)
 
-    def _completion_alert(self, payload):
-        """Give an audible and visible alert only after a complete promotion."""
+    def _play_completion_sound(self):
+        """Play one best-effort audible completion signal."""
         try:
             if sys.platform == "darwin":
                 sound = Path("/System/Library/Sounds/Glass.aiff")
@@ -1691,15 +1881,35 @@ class App(tk.Tk):
                 self.bell()
         except Exception:
             self.bell()
+
+    def _download_completion_alert(self, payload):
+        """Alert only after the complete CSV/PDF folder exists on the Mac."""
+        self._play_completion_sound()
+        summary = payload.get("processing_summary") or {}
+        complete_run = bool(payload.get("complete_run"))
         messagebox.showinfo(
-            "Processing complete",
             (
-                f"Everything is done.\n\n"
-                f"Processed: {payload['processed']} ready session(s)\n"
-                f"Skipped: {payload['skipped']} session(s)\n"
-                f"Script version: {payload['script_version']}\n\n"
-                "The complete combined CSV and matching PDF folder are ready "
-                "to download."
+                "Download complete"
+                if complete_run
+                else "PDF download complete"
+            ),
+            (
+                (
+                    "Everything is done, including the CSV/PDF Mac "
+                    "download.\n\n"
+                    if complete_run
+                    else "The PDF archive was downloaded, verified, and "
+                    "extracted.\n\n"
+                )
+                + (
+                    f"Processed: {summary.get('processed')} ready session(s)\n"
+                    f"Skipped: {summary.get('skipped')} session(s)\n"
+                    f"Script version: {summary.get('script_version')}\n"
+                    if summary
+                    else ""
+                )
+                + f"PDFs extracted: {payload['pdf_count']}\n\n"
+                f"Completed folder:\n{payload['folder']}"
             ),
         )
 
@@ -3145,46 +3355,81 @@ class App(tk.Tk):
         partial_folder = paths["partial_folder"]
         partial_csv = paths["partial_csv"]
         partial_pdfs = paths["partial_pdfs"]
+        partial_pdf_archive = paths["partial_pdf_archive"]
+        self.auto_download_in_progress = True
+        self.download_button.configure(state="disabled")
+        self.plot_download_button.configure(state="disabled")
+        self.results_status.set(
+            "Firebird processing is complete. Packaging and downloading one "
+            "PDF archive to this Mac."
+        )
 
         def action():
-            local_root.mkdir(parents=True, exist_ok=True)
-            if completed_folder.exists() or partial_folder.exists():
-                raise FileExistsError(
-                    "Refusing to overwrite an existing automatic download: "
+            try:
+                local_root.mkdir(parents=True, exist_ok=True)
+                if completed_folder.exists() or partial_folder.exists():
+                    raise FileExistsError(
+                        "Refusing to overwrite an existing automatic download: "
+                        f"{completed_folder}"
+                    )
+                try:
+                    partial_folder.mkdir()
+                    self.log(
+                        f"Automatically staging completed CSV on Mac: "
+                        f"{partial_csv}"
+                    )
+                    self.ssh().download(
+                        remote_csv, str(partial_csv), timeout=900
+                    )
+                    archive = self._prepare_remote_pdf_archive(remote_pdfs)
+                    self.log(
+                        "Downloading one Firebird PDF archive to Mac: "
+                        f"{archive['archive']} -> {partial_pdf_archive}"
+                    )
+                    self.ssh().download(
+                        archive["archive"],
+                        str(partial_pdf_archive),
+                        timeout=1800,
+                    )
+                    self.log(
+                        f"Extracting and verifying {archive['pdf_count']} "
+                        f"PDF(s) on Mac: {partial_pdfs}"
+                    )
+                    pdf_count = extract_pdf_archive(
+                        partial_pdf_archive,
+                        partial_pdfs,
+                        expected_count=int(archive["pdf_count"]),
+                    )
+                    partial_pdf_archive.unlink()
+                    partial_folder.replace(completed_folder)
+                except Exception:
+                    if partial_folder.exists():
+                        shutil.rmtree(partial_folder)
+                    raise
+                self.log(
+                    f"Automatic Mac download completed in one folder: "
                     f"{completed_folder}"
                 )
-            try:
-                partial_folder.mkdir()
-                self.log(
-                    f"Automatically staging completed CSV on Mac: "
-                    f"{partial_csv}"
+                self.work.put(
+                    (
+                        "auto_download_complete",
+                        {
+                            "folder": str(completed_folder),
+                            "pdf_count": pdf_count,
+                            "complete_run": True,
+                            "processing_summary": dict(
+                                self.last_processing_summary
+                            ),
+                        },
+                    )
                 )
-                self.ssh().download(
-                    remote_csv, str(partial_csv), timeout=900
-                )
-                self.log(
-                    f"Automatically staging completed PDF folder on Mac: "
-                    f"{partial_pdfs}"
-                )
-                self.ssh().download_directory(
-                    remote_pdfs, str(partial_pdfs), timeout=1800
-                )
-                partial_folder.replace(completed_folder)
+                self.work.put((
+                    "status",
+                    f"Completed results saved on Mac in {completed_folder}",
+                ))
             except Exception:
-                if partial_folder.exists():
-                    shutil.rmtree(partial_folder)
+                self.work.put(("auto_download_failed", None))
                 raise
-            self.log(
-                f"Automatic Mac download completed in one folder: "
-                f"{completed_folder}"
-            )
-            self.work.put(
-                ("auto_download_complete", str(completed_folder))
-            )
-            self.work.put((
-                "status",
-                f"Completed results saved on Mac in {completed_folder}",
-            ))
 
         self._background(action)
 
@@ -3296,21 +3541,63 @@ class App(tk.Tk):
         destination = str(
             Path(destination) / PurePosixPath(remote_path).name
         )
+        destination_path = Path(destination)
+        partial_destination = destination_path.with_name(
+            destination_path.name + ".partial"
+        )
+        local_archive = partial_destination / ".pdfs_download.zip"
         self.plot_download_button.configure(state="disabled")
 
         def action():
             try:
+                if destination_path.exists() or partial_destination.exists():
+                    raise FileExistsError(
+                        "Refusing to overwrite an existing PDF download: "
+                        f"{destination_path}"
+                    )
+                archive = self._prepare_remote_pdf_archive(remote_path)
+                partial_destination.mkdir(parents=True)
                 self.log(
-                    f"Downloading PDF plot folder: {remote_path} -> "
-                    f"{destination}"
+                    f"Downloading one PDF archive: {archive['archive']} -> "
+                    f"{local_archive}"
                 )
-                self.ssh().download_directory(
-                    remote_path, destination, timeout=1800
+                self.ssh().download(
+                    archive["archive"], str(local_archive), timeout=1800
                 )
-                self.log(f"PDF plot folder downloaded to: {destination}")
+                pdf_count = extract_pdf_archive(
+                    local_archive,
+                    partial_destination / "pdfs",
+                    expected_count=int(archive["pdf_count"]),
+                )
+                local_archive.unlink()
+                extracted_folder = partial_destination / "pdfs"
+                extracted_folder.replace(destination_path)
+                partial_destination.rmdir()
+                self.log(
+                    f"PDF plot folder downloaded and verified: "
+                    f"{destination_path}"
+                )
                 self.work.put(
-                    ("status", f"PDF plots downloaded to {destination}")
+                    (
+                        "status",
+                        f"PDF plots downloaded to {destination_path}",
+                    )
                 )
+                self.work.put(
+                    (
+                        "manual_pdf_download_complete",
+                        {
+                            "folder": str(destination_path),
+                            "pdf_count": pdf_count,
+                            "complete_run": False,
+                            "processing_summary": {},
+                        },
+                    )
+                )
+            except Exception:
+                if partial_destination.exists():
+                    shutil.rmtree(partial_destination)
+                raise
             finally:
                 self.work.put(("plot_download_done", None))
 
