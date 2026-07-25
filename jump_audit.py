@@ -263,6 +263,23 @@ def audit_manifest(manifest: dict) -> dict:
                     )
                 ),
                 "approved_records": len(record_ids),
+                "records_using_detected_start_audit_only": len(
+                    {
+                        track["qc_record_id"]
+                        for track in usable
+                        if track.get("audit_start_basis")
+                        == "POSITIVE_DETECTED_START_AUDIT_ONLY"
+                    }
+                ),
+                "audit_start_bases": ";".join(
+                    sorted(
+                        {
+                            str(track.get("audit_start_basis") or "")
+                            for track in usable
+                            if track.get("audit_start_basis")
+                        }
+                    )
+                ),
                 "animal_tracks": len(usable),
                 "tracks_with_jumps": tracks_with_jumps,
                 "persistent_jump_tracks": persistent_tracks,

@@ -35,10 +35,15 @@ inclusive end frame of 7262. This represents 7200 intervals between frames and
 collected in the appendix at the end of this document.</p>
 
 <h3>Human-approved disturbance adjustment and provenance</h3>
-<p>The Jump Audit examines every approved, ready BA and fight session and
-groups evidence by source video. It never changes an analysis start
-automatically. A video-level recommendation appears in a separate GUI tab and
-becomes the final start only after the researcher selects the video and clicks
+<p>The Jump Audit examines every approved BA and fight session with usable
+positive start evidence and groups evidence by source video. A final approved
+start is preferred. If a video is deliberately held for manual start review,
+one positive, unambiguous detected interval may be used provisionally for the
+read-only audit. Zero, missing, and conflicting detected intervals remain
+excluded. A provisional audit start never authorizes processing.</p>
+<p>The audit never changes an analysis start automatically. A video-level
+recommendation appears in a separate GUI tab and becomes the final start only
+after the researcher selects the video and clicks
 <strong>Approve selected start recommendation</strong>.</p>
 <p>The analysis-ready columns near the front of the combined CSV are
 <code>analysis_start_frame</code> and

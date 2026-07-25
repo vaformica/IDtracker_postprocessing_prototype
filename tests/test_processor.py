@@ -34,12 +34,37 @@ from firebird_gui import (
     extract_pairs,
     find_interval_candidates,
     normalized_video_name,
+    jump_audit_start_for_record,
     parse_video_fields,
     validate_start_report_updates,
 )
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_jump_audit_can_use_detected_start_without_approving_it(self):
+        choice = jump_audit_start_for_record(
+            {"start": "", "detected": "1538"}
+        )
+        self.assertEqual(
+            choice, (1538, "POSITIVE_DETECTED_START_AUDIT_ONLY")
+        )
+        self.assertIsNone(
+            jump_audit_start_for_record(
+                {"start": "", "detected": "0"}
+            )
+        )
+        self.assertIsNone(
+            jump_audit_start_for_record(
+                {"start": "", "detected": "1095,1538"}
+            )
+        )
+        self.assertEqual(
+            jump_audit_start_for_record(
+                {"start": "1700", "detected": "1538"}
+            ),
+            (1700, "FINAL_APPROVED_START"),
+        )
+
     def test_automatic_download_uses_one_timestamped_folder(self):
         with tempfile.TemporaryDirectory() as folder:
             home = Path(folder)

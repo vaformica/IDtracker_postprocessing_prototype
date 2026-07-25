@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCRIPT_VERSION = "0.5.1"
+SCRIPT_VERSION = "0.5.2"
 
 IDTRACKER_TRAJECTORY_SOURCES = {
     "validated.npy": "IDTRACKER_VALIDATED",

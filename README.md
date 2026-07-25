@@ -79,7 +79,7 @@ Workflow:
 5. Correct missing, ambiguous, or zero starts with **Edit selected start frame**.
    Alternatively, use **Export sessions needing start times**, fill only
    `enter_start_global_frame`, and use **Import completed start-time CSV**.
-6. Click **Audit jumps in all ready BA + fights**. Review any video-wide
+6. Click **Audit jumps in all approved BA + fights**. Review any video-wide
    disturbance recommendation in the Jump Audit tab. No start changes until
    you select a video and click **Approve selected start recommendation**.
 7. For examples, double-click individual **Process?** cells. For a large
@@ -147,13 +147,20 @@ and flagged for start review. Raw coordinates are preserved, never
 interpolated, and the CSV reports the threshold, excluded-coordinate count, and
 QC status for every animal.
 
-The Jump Audit evaluates all approved ready BA and fight sessions in one
+The Jump Audit evaluates all approved BA and fight sessions with usable
+positive start evidence in one
 read-only Firebird pass. A video-wide disturbance requires synchronized jump
 evidence from at least three distinct approved sessions and at least half of
 the available approved sessions for that video. The proposed start is the next
 50-frame boundary after the final synchronized event, and it is offered only
 when a complete analysis span fits. Cell- or animal-specific jumps do not
 produce a video-level start recommendation.
+
+For a video deliberately marked for manual start review, the read-only audit
+may use one positive, unambiguous detected interval to locate disturbances.
+This provisional audit start is labeled in the audit CSV and never authorizes
+processing. Zero, missing, and conflicting detected intervals remain excluded.
+Only clicking the Jump Audit approval button makes the recommended start final.
 
 The main statistical columns use intuitive final-decision names:
 `analysis_start_frame` and `analysis_end_frame_inclusive`. The original start

@@ -479,6 +479,27 @@ def automatic_download_paths(token: str, home: Path | None = None) -> dict:
     }
 
 
+def jump_audit_start_for_record(record: dict) -> tuple[int, str] | None:
+    """Choose a positive start for read-only audit, never for processing.
+
+    A final GUI-approved start is preferred. If it is blank because the video
+    was deliberately placed on manual start review, one unambiguous positive
+    detected interval may be used only to inspect jump timing. Zero, missing,
+    and conflicting detected starts remain unauditable.
+    """
+    for key, basis in (
+        ("start", "FINAL_APPROVED_START"),
+        ("detected", "POSITIVE_DETECTED_START_AUDIT_ONLY"),
+    ):
+        try:
+            value = int(str(record.get(key, "")).strip())
+        except (TypeError, ValueError):
+            continue
+        if value > 0:
+            return value, basis
+    return None
+
+
 def parse_toml(text: str):
     if tomllib is not None:
         return tomllib.loads(text)
@@ -863,7 +884,7 @@ class App(tk.Tk):
         ).grid(row=2, column=1, sticky="w", padx=4, pady=(4, 2))
         self.jump_audit_button = ttk.Button(
             start_file_bar,
-            text="Audit jumps in all ready BA + fights",
+            text="Audit jumps in all approved BA + fights",
             command=self.run_jump_audit,
         )
         self.jump_audit_button.grid(
@@ -940,7 +961,7 @@ class App(tk.Tk):
         audit_controls.pack(fill="x", padx=6, pady=6)
         ttk.Button(
             audit_controls,
-            text="Run audit on all approved ready BA + fights",
+            text="Run audit on all approved BA + fights",
             command=self.run_jump_audit,
         ).pack(side="left", padx=4)
         ttk.Button(
@@ -1725,23 +1746,25 @@ class App(tk.Tk):
                 "The analysis span and jump threshold must be positive.",
             )
             return
-        ready = []
+        auditable = []
+        using_detected_start = 0
         for record in self.all_records:
-            try:
-                positive_start = int(record.get("start", "")) > 0
-            except (TypeError, ValueError):
-                positive_start = False
             analysis = str(record.get("analysis") or "").lower()
+            audit_start = jump_audit_start_for_record(record)
             if (
                 record.get("processable")
-                and positive_start
                 and analysis in {"ba", "fight"}
+                and audit_start is not None
             ):
-                ready.append(record)
-        if not ready:
+                start_value, start_basis = audit_start
+                auditable.append((record, start_value, start_basis))
+                if start_basis == "POSITIVE_DETECTED_START_AUDIT_ONLY":
+                    using_detected_start += 1
+        if not auditable:
             messagebox.showwarning(
-                "No ready BA or fight sessions",
-                "Scan approved runs first and enter all required start frames.",
+                "No auditable BA or fight sessions",
+                "Scan approved runs first. The audit needs either a final "
+                "positive start or one unambiguous positive detected interval.",
             )
             return
 
@@ -1755,17 +1778,20 @@ class App(tk.Tk):
                     "cell_label": record["cell_label"],
                     "qc_record_id": record["qc_record_id"],
                     "trajectory": record["trajectory"],
-                    "start": int(record["start"]),
+                    "start": start_value,
+                    "audit_start_basis": start_basis,
                 }
-                for record in ready
+                for record, start_value, start_basis in auditable
             ],
         }
 
         def action():
             self.log(
-                f"Jump audit started for all {len(ready)} approved ready BA "
-                f"and fight session(s); threshold={jump_threshold:g} px; "
-                f"inclusive span={window}."
+                f"Jump audit started for {len(auditable)} approved BA/fight "
+                f"session(s) with positive start evidence; "
+                f"{using_detected_start} use a positive detected interval for "
+                "audit only; "
+                f"threshold={jump_threshold:g} px; inclusive span={window}."
             )
             self.work.put(("show_logs", None))
             remote_home = self.ssh().run('printf "%s" "$HOME"').strip()
@@ -1779,7 +1805,10 @@ class App(tk.Tk):
                 timeout=3600,
             )
             result = json.loads(output)
-            result["audited_session_count"] = len(ready)
+            result["audited_session_count"] = len(auditable)
+            result["detected_start_audit_only_count"] = (
+                using_detected_start
+            )
             result["created_at"] = datetime.now().astimezone().isoformat(
                 timespec="seconds"
             )
@@ -1792,7 +1821,8 @@ class App(tk.Tk):
         self.jump_audit_running = True
         self.jump_audit_button.configure(state="disabled")
         self.status.set(
-            f"Auditing {len(ready)} approved ready BA and fight sessions..."
+            f"Auditing {len(auditable)} approved BA/fight sessions with "
+            "positive start evidence..."
         )
 
         def guarded():
@@ -1833,8 +1863,10 @@ class App(tk.Tk):
         )
         path_text = self._write_jump_audit_files()
         self.jump_audit_status.set(
-            f"Audited {result.get('audited_session_count', 0)} approved ready "
-            f"BA/fight sessions across {len(self.jump_audit_summaries)} videos. "
+            f"Audited {result.get('audited_session_count', 0)} approved "
+            f"BA/fight sessions across {len(self.jump_audit_summaries)} videos; "
+            f"{result.get('detected_start_audit_only_count', 0)} session(s) "
+            "used detected intervals for audit only. "
             f"{recommended} video(s) have a reviewable start recommendation. "
             "No starts have been changed."
         )

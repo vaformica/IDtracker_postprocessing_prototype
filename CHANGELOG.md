@@ -4,6 +4,17 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.5.2 - 2026-07-24
+
+- Fixed Jump Audit omission of videos deliberately marked for manual start
+  review. The read-only audit may now use one positive, unambiguous detected
+  interval as provisional timing evidence.
+- Kept processing conservative: a provisionally audited detected start does
+  not become final until the researcher approves the video recommendation.
+- Added explicit audit-report provenance identifying records that used a
+  detected interval for audit only. Zero, missing, and conflicting detected
+  starts remain excluded.
+
 ## 0.5.1 - 2026-07-24
 
 - Restored one-folder automatic downloads on the Mac. Each completed run now
