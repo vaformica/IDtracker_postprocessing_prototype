@@ -26,6 +26,7 @@ from firebird_gui import (
     BATCH_SESSION_RESOLVER,
     COMBINE_RESULTS,
     TRAJECTORY_NAMES,
+    automatic_download_paths,
     KNOWN_START_REVIEW_STEMS,
     make_missing_start_report,
     make_missing_trajectory_report,
@@ -39,6 +40,29 @@ from firebird_gui import (
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_automatic_download_uses_one_timestamped_folder(self):
+        with tempfile.TemporaryDirectory() as folder:
+            home = Path(folder)
+            (home / "Downloads").mkdir()
+            paths = automatic_download_paths(
+                "20260724_220000_123456", home=home
+            )
+            completed = (
+                home
+                / "Downloads"
+                / "IDtracker_postprocessing_results"
+                / "results_20260724_220000_123456"
+            )
+            self.assertEqual(paths["completed_folder"], completed)
+            self.assertEqual(
+                paths["partial_csv"].name, "combined_results.csv"
+            )
+            self.assertEqual(paths["partial_pdfs"].name, "pdfs")
+            self.assertEqual(
+                paths["partial_folder"].name,
+                ".results_20260724_220000_123456.partial",
+            )
+
     def test_gui_and_processor_accept_exactly_the_same_source_names(self):
         self.assertEqual(
             set(TRAJECTORY_NAMES),

@@ -461,6 +461,24 @@ def expand_remote_path(path: str, remote_home: str) -> str:
     return path
 
 
+def automatic_download_paths(token: str, home: Path | None = None) -> dict:
+    """Return the atomic one-folder Mac download layout for one batch."""
+    home = Path.home() if home is None else Path(home)
+    downloads = home / "Downloads"
+    local_root = (
+        downloads if downloads.is_dir() else home
+    ) / "IDtracker_postprocessing_results"
+    completed_folder = local_root / f"results_{token}"
+    partial_folder = local_root / f".results_{token}.partial"
+    return {
+        "root": local_root,
+        "completed_folder": completed_folder,
+        "partial_folder": partial_folder,
+        "partial_csv": partial_folder / "combined_results.csv",
+        "partial_pdfs": partial_folder / "pdfs",
+    }
+
+
 def parse_toml(text: str):
     if tomllib is not None:
         return tomllib.loads(text)
@@ -2182,58 +2200,51 @@ class App(tk.Tk):
         self.auto_download_started_for = token
         remote_csv = self.last_combined_remote
         remote_pdfs = self.last_plot_remote
-        downloads = Path.home() / "Downloads"
-        local_root = (
-            downloads if downloads.is_dir() else Path.home()
-        ) / "IDtracker_postprocessing_results"
-        local_csv = local_root / f"combined_results_{token}.csv"
-        local_pdfs = local_root / f"combined_results_{token}_pdfs"
-        partial_csv = local_root / f".combined_results_{token}.csv.partial"
-        partial_pdfs = local_root / f".combined_results_{token}_pdfs.partial"
+        paths = automatic_download_paths(token)
+        local_root = paths["root"]
+        completed_folder = paths["completed_folder"]
+        partial_folder = paths["partial_folder"]
+        partial_csv = paths["partial_csv"]
+        partial_pdfs = paths["partial_pdfs"]
 
         def action():
             local_root.mkdir(parents=True, exist_ok=True)
-            if (
-                local_csv.exists()
-                or local_pdfs.exists()
-                or partial_csv.exists()
-                or partial_pdfs.exists()
-            ):
+            if completed_folder.exists() or partial_folder.exists():
                 raise FileExistsError(
                     "Refusing to overwrite an existing automatic download: "
-                    f"{local_csv} or {local_pdfs}"
+                    f"{completed_folder}"
                 )
             try:
+                partial_folder.mkdir()
                 self.log(
-                    f"Automatically staging completed CSV on Mac: {local_csv}"
+                    f"Automatically staging completed CSV on Mac: "
+                    f"{partial_csv}"
                 )
                 self.ssh().download(
                     remote_csv, str(partial_csv), timeout=900
                 )
                 self.log(
                     f"Automatically staging completed PDF folder on Mac: "
-                    f"{local_pdfs}"
+                    f"{partial_pdfs}"
                 )
                 self.ssh().download_directory(
                     remote_pdfs, str(partial_pdfs), timeout=1800
                 )
-                partial_pdfs.replace(local_pdfs)
-                partial_csv.replace(local_csv)
+                partial_folder.replace(completed_folder)
             except Exception:
-                if partial_csv.exists():
-                    partial_csv.unlink()
-                if partial_pdfs.exists():
-                    shutil.rmtree(partial_pdfs)
-                if local_pdfs.exists() and not local_csv.exists():
-                    shutil.rmtree(local_pdfs)
+                if partial_folder.exists():
+                    shutil.rmtree(partial_folder)
                 raise
             self.log(
-                f"Automatic Mac download completed: {local_csv}; {local_pdfs}"
+                f"Automatic Mac download completed in one folder: "
+                f"{completed_folder}"
             )
-            self.work.put(("auto_download_complete", str(local_root)))
+            self.work.put(
+                ("auto_download_complete", str(completed_folder))
+            )
             self.work.put((
                 "status",
-                f"Completed results saved on Mac in {local_root}",
+                f"Completed results saved on Mac in {completed_folder}",
             ))
 
         self._background(action)

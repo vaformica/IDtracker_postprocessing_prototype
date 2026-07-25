@@ -4,6 +4,15 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.5.1 - 2026-07-24
+
+- Restored one-folder automatic downloads on the Mac. Each completed run now
+  creates `results_YYYYMMDD_HHMMSS_microseconds/` containing
+  `combined_results.csv` and `pdfs/`.
+- Stages the entire timestamped folder under a hidden `.partial` name and
+  promotes it only after both the CSV and matching PDF collection download
+  successfully.
+
 ## 0.5.0 - 2026-07-24
 
 - Added a GUI-configurable coordinate-jump threshold, default 50 pixels.

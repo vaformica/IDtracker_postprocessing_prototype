@@ -111,11 +111,11 @@ timestamped copy on the Mac under:
 
 `~/Downloads/IDtracker_postprocessing_results`
 
-The two matching items are
-`combined_results_YYYYMMDD_HHMMSS_microseconds.csv` and
-`combined_results_YYYYMMDD_HHMMSS_microseconds_pdfs/`. They are staged as
-hidden partial items and promoted only after both downloads finish. The manual
-download buttons remain available.
+Each completed run is saved in one timestamped folder:
+`results_YYYYMMDD_HHMMSS_microseconds/`. That folder contains
+`combined_results.csv` and `pdfs/`. The entire folder is first staged under a
+hidden `.partial` name and becomes visible only after both the CSV and all PDFs
+finish downloading. The manual download buttons remain available.
 
 In the combined CSV, `cell_label`, `video`, and `analysis_type` (fight or BA)
 are deliberately the first three columns. `video_year` is fourth and is parsed
