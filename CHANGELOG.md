@@ -4,6 +4,29 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.7.0 - 2026-07-25
+
+- Retained every existing variable-length `post_wake_*` output from wake
+  through the approved inclusive analysis end.
+- Added a separately grouped `post_wake_3600_*` block covering exactly 3600
+  adjacent-frame intervals and 3601 inclusive coordinate observations.
+- Anchored BA fixed windows at each focal animal's wake threshold crossing.
+  Anchored both rows of a two-animal fight at the later of the two crossings,
+  so both animals are compared over one common range after both have awakened.
+- Required a complete fixed window. Missing wake crossings, unexpected fight
+  animal counts, and fixed ends beyond the approved analysis end produce
+  explicit statuses and blank numeric results rather than zeros or shortened
+  windows.
+- Reused the v0.6.0 accepted-step, missing-gap, 200-pixel anti-jump,
+  segment-midpoint, wall, fungus, and direct joint-mask rules and assertions.
+- Added fixed-window social contact, animal-specific social movement,
+  disappearance, visible return-interaction, optional substitution,
+  remaining-missing, and effective-coordinate outputs.
+- Added fixed-window provisional turtling frame, event, proportion, and status
+  outputs. Fight time on fungus remains in the detected-frame denominator
+  while fungus candidates remain excluded from the numerator.
+- Left the PDF generator unchanged.
+
 ## 0.6.0 - 2026-07-24
 
 - Kept the researcher-selected one-frame jump threshold at 200 pixels.

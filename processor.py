@@ -18,7 +18,8 @@ from pathlib import Path
 import numpy as np
 
 
-SCRIPT_VERSION = "0.6.0"
+SCRIPT_VERSION = "0.7.0"
+POST_WAKE_FIXED_INTERVALS = 3600
 
 IDTRACKER_TRAJECTORY_SOURCES = {
     "validated.npy": "IDTRACKER_VALIDATED",
@@ -81,6 +82,61 @@ OUTPUT_COLUMNS = [
     "post_wake_open_off_fungus_proportion",
     "post_wake_open_off_fungus_distance_px_per_available_step",
     "post_wake_speed_px_per_open_off_fungus_step",
+    "post_wake_3600_analysis_status",
+    "post_wake_3600_anchor_rule",
+    "post_wake_3600_start_global_frame",
+    "post_wake_3600_end_global_frame_inclusive",
+    "post_wake_3600_frame_intervals",
+    "post_wake_3600_frame_observations_inclusive",
+    "post_wake_3600_wall_analysis_status",
+    "post_wake_3600_fungus_analysis_status",
+    "post_wake_3600_open_off_fungus_analysis_status",
+    "post_wake_3600_valid_coordinate_frames",
+    "post_wake_3600_valid_movement_steps",
+    "post_wake_3600_missing_coordinate_frames",
+    "post_wake_3600_jump_excluded_steps",
+    "post_wake_3600_total_distance_px",
+    "post_wake_3600_distance_px_per_valid_step",
+    "post_wake_3600_frames_inside_wall_buffer",
+    "post_wake_3600_frames_outside_wall_buffer",
+    "post_wake_3600_open_area_proportion",
+    "post_wake_3600_distance_px_inside_wall_buffer",
+    "post_wake_3600_distance_px_outside_wall_buffer",
+    "post_wake_3600_steps_inside_wall_buffer",
+    "post_wake_3600_steps_outside_wall_buffer",
+    "post_wake_3600_open_distance_px_per_available_step",
+    "post_wake_3600_speed_px_per_open_step",
+    "post_wake_3600_frames_on_fungus",
+    "post_wake_3600_frames_off_fungus",
+    "post_wake_3600_frames_in_fungus_edge_buffer",
+    "post_wake_3600_frames_in_fungus_interior",
+    "post_wake_3600_distance_px_on_fungus",
+    "post_wake_3600_distance_px_off_fungus",
+    "post_wake_3600_distance_px_in_fungus_edge_buffer",
+    "post_wake_3600_distance_px_in_fungus_interior",
+    "post_wake_3600_steps_on_fungus",
+    "post_wake_3600_steps_off_fungus",
+    "post_wake_3600_off_fungus_proportion",
+    "post_wake_3600_off_fungus_distance_px_per_available_step",
+    "post_wake_3600_speed_px_per_off_fungus_step",
+    "post_wake_3600_frames_open_and_off_fungus",
+    "post_wake_3600_distance_px_open_and_off_fungus",
+    "post_wake_3600_steps_open_and_off_fungus",
+    "post_wake_3600_open_off_fungus_proportion",
+    "post_wake_3600_open_off_fungus_distance_px_per_available_step",
+    "post_wake_3600_speed_px_per_open_off_fungus_step",
+    "post_wake_3600_social_analysis_status",
+    "post_wake_3600_frames_within_social_distance",
+    "post_wake_3600_distance_moved_px_while_within_social_distance",
+    "post_wake_3600_social_disappearance_frames",
+    "post_wake_3600_social_return_interaction_events",
+    "post_wake_3600_social_disappearance_imputed_frames",
+    "post_wake_3600_remaining_missing_coordinate_frames_after_social_substitution",
+    "post_wake_3600_coordinate_frames_used_in_distance_and_location_calculations",
+    "post_wake_3600_turtling_candidate_frames",
+    "post_wake_3600_turtling_candidate_proportion_of_detected_frames",
+    "post_wake_3600_turtling_candidate_events",
+    "post_wake_3600_turtling_detector_status",
     "wall_buffer_px",
     "frames_inside_wall_buffer",
     "frames_outside_wall_buffer",
@@ -592,6 +648,31 @@ POST_WAKE_NUMERIC_COLUMNS = (
     "post_wake_speed_px_per_open_off_fungus_step",
 )
 
+POST_WAKE_3600_CORE_NUMERIC_COLUMNS = tuple(
+    column.replace("post_wake_", "post_wake_3600_", 1)
+    for column in POST_WAKE_NUMERIC_COLUMNS
+)
+POST_WAKE_3600_EXTRA_NUMERIC_COLUMNS = (
+    "post_wake_3600_start_global_frame",
+    "post_wake_3600_end_global_frame_inclusive",
+    "post_wake_3600_frame_intervals",
+    "post_wake_3600_frame_observations_inclusive",
+    "post_wake_3600_frames_in_fungus_edge_buffer",
+    "post_wake_3600_frames_in_fungus_interior",
+    "post_wake_3600_distance_px_in_fungus_edge_buffer",
+    "post_wake_3600_distance_px_in_fungus_interior",
+    "post_wake_3600_frames_within_social_distance",
+    "post_wake_3600_distance_moved_px_while_within_social_distance",
+    "post_wake_3600_social_disappearance_frames",
+    "post_wake_3600_social_return_interaction_events",
+    "post_wake_3600_social_disappearance_imputed_frames",
+    "post_wake_3600_remaining_missing_coordinate_frames_after_social_substitution",
+    "post_wake_3600_coordinate_frames_used_in_distance_and_location_calculations",
+    "post_wake_3600_turtling_candidate_frames",
+    "post_wake_3600_turtling_candidate_proportion_of_detected_frames",
+    "post_wake_3600_turtling_candidate_events",
+)
+
 
 def blank_post_wake_metrics(status: str, is_fight: bool) -> dict:
     """Return explicit missing post-wake outputs for an unavailable wake frame."""
@@ -612,6 +693,40 @@ def blank_post_wake_metrics(status: str, is_fight: bool) -> dict:
                 if is_fight
                 else "NOT_APPLICABLE_NOT_FIGHT"
             ),
+        }
+    )
+    return output
+
+
+def blank_post_wake_3600_metrics(
+    status: str,
+    *,
+    is_fight: bool,
+    anchor_rule: str,
+) -> dict:
+    """Return explicit blanks when the complete fixed window is unavailable."""
+    output = {
+        column: ""
+        for column in (
+            POST_WAKE_3600_CORE_NUMERIC_COLUMNS
+            + POST_WAKE_3600_EXTRA_NUMERIC_COLUMNS
+        )
+    }
+    output.update(
+        {
+            "post_wake_3600_analysis_status": status,
+            "post_wake_3600_anchor_rule": anchor_rule,
+            "post_wake_3600_wall_analysis_status": status,
+            "post_wake_3600_fungus_analysis_status": (
+                status if is_fight else "NOT_APPLICABLE_NOT_FIGHT"
+            ),
+            "post_wake_3600_open_off_fungus_analysis_status": (
+                status if is_fight else "NOT_APPLICABLE_NOT_FIGHT"
+            ),
+            "post_wake_3600_social_analysis_status": (
+                status if is_fight else "NOT_APPLICABLE_NOT_FIGHT"
+            ),
+            "post_wake_3600_turtling_detector_status": status,
         }
     )
     return output
@@ -911,6 +1026,294 @@ def compute_post_wake_metrics(
     return output
 
 
+def compute_post_wake_3600_metrics(
+    *,
+    effective_xy: np.ndarray,
+    raw_xy: np.ndarray,
+    original_xy: np.ndarray,
+    start_offset: int,
+    analysis_start_global_frame: int,
+    step_distances: np.ndarray,
+    accepted_steps: np.ndarray,
+    rejected_jump_steps: np.ndarray,
+    primary_roi: np.ndarray | None,
+    secondary_roi: np.ndarray | None,
+    wall_buffer_px: float,
+    fungus_buffer_px: float,
+    is_fight: bool,
+    anchor_rule: str,
+    social: dict | None,
+    social_all_xy: np.ndarray,
+    social_all_missing_mask: np.ndarray,
+    focal_social_disappearance_mask: np.ndarray,
+    social_distance_threshold_px: float,
+    imputed_mask: np.ndarray,
+    turtling_result: dict,
+) -> dict:
+    """Calculate one complete 3600-interval window after the chosen wake anchor.
+
+    The inclusive coordinate window contains 3601 frame observations. For BAs,
+    ``start_offset`` is the focal animal's wake offset. For fights it is the
+    later of the two wake offsets, so both output rows share exactly the same
+    global start and end. All movement calculations retain the existing
+    accepted-adjacent-step and midpoint rules.
+    """
+    stop_offset = start_offset + POST_WAKE_FIXED_INTERVALS
+    if start_offset < 0 or stop_offset >= len(effective_xy):
+        raise ValueError("A complete 3600-interval post-wake window is required")
+    frame_slice = slice(start_offset, stop_offset + 1)
+    step_slice = slice(start_offset, stop_offset)
+    fixed_effective = np.asarray(effective_xy[frame_slice], dtype=float)
+    fixed_raw = np.asarray(raw_xy[frame_slice], dtype=float)
+    fixed_original = np.asarray(original_xy[frame_slice], dtype=float)
+    fixed_step_distances = np.asarray(step_distances[step_slice], dtype=float)
+    fixed_accepted_steps = np.asarray(accepted_steps[step_slice], dtype=bool)
+    fixed_rejected_steps = np.asarray(
+        rejected_jump_steps[step_slice], dtype=bool
+    )
+
+    core = compute_post_wake_metrics(
+        effective_xy=fixed_effective,
+        raw_xy=fixed_raw,
+        wake_offset=0,
+        step_distances=fixed_step_distances,
+        accepted_steps=fixed_accepted_steps,
+        rejected_jump_steps=fixed_rejected_steps,
+        primary_roi=primary_roi,
+        secondary_roi=secondary_roi,
+        wall_buffer_px=wall_buffer_px,
+        is_fight=is_fight,
+    )
+    output = {
+        key.replace("post_wake_", "post_wake_3600_", 1): value
+        for key, value in core.items()
+    }
+    output.update(
+        {
+            "post_wake_3600_anchor_rule": anchor_rule,
+            "post_wake_3600_start_global_frame": (
+                analysis_start_global_frame + start_offset
+            ),
+            "post_wake_3600_end_global_frame_inclusive": (
+                analysis_start_global_frame + stop_offset
+            ),
+            "post_wake_3600_frame_intervals": POST_WAKE_FIXED_INTERVALS,
+            "post_wake_3600_frame_observations_inclusive": (
+                POST_WAKE_FIXED_INTERVALS + 1
+            ),
+        }
+    )
+
+    fixed_valid = np.isfinite(fixed_effective).all(axis=1)
+    fixed_raw_valid = np.isfinite(fixed_raw).all(axis=1)
+    fixed_original_valid = np.isfinite(fixed_original).all(axis=1)
+    fixed_imputed = np.asarray(imputed_mask[frame_slice], dtype=bool)
+    fixed_imputed_count = int((fixed_imputed & fixed_valid).sum())
+    fixed_missing_count = int((~fixed_raw_valid).sum())
+    remaining_missing = fixed_missing_count - fixed_imputed_count
+    if remaining_missing < 0:
+        raise AssertionError(
+            "Fixed-window social substitutions exceeded original missing frames"
+        )
+    output[
+        "post_wake_3600_social_disappearance_imputed_frames"
+    ] = fixed_imputed_count if is_fight else ""
+    output[
+        "post_wake_3600_remaining_missing_coordinate_frames_after_social_substitution"
+    ] = remaining_missing
+    output[
+        "post_wake_3600_coordinate_frames_used_in_distance_and_location_calculations"
+    ] = int(fixed_valid.sum())
+    output.update(
+        {
+            "post_wake_3600_frames_in_fungus_edge_buffer": "",
+            "post_wake_3600_frames_in_fungus_interior": "",
+            "post_wake_3600_distance_px_in_fungus_edge_buffer": "",
+            "post_wake_3600_distance_px_in_fungus_interior": "",
+        }
+    )
+    if is_fight and secondary_roi is not None:
+        fixed_on_fungus = np.zeros(len(fixed_effective), dtype=bool)
+        fixed_fungus_edge_distance = np.full(
+            len(fixed_effective), np.nan
+        )
+        if fixed_valid.any():
+            fixed_on_fungus[fixed_valid] = points_inside_polygon(
+                fixed_effective[fixed_valid], secondary_roi
+            )
+            fixed_fungus_edge_distance[fixed_valid] = (
+                distance_to_polygon_boundary(
+                    fixed_effective[fixed_valid], secondary_roi
+                )
+            )
+        fixed_in_fungus_buffer = (
+            fixed_on_fungus
+            & (fixed_fungus_edge_distance <= fungus_buffer_px)
+        )
+        fixed_in_fungus_interior = (
+            fixed_on_fungus
+            & (fixed_fungus_edge_distance > fungus_buffer_px)
+        )
+        fixed_midpoint_on_fungus = np.zeros(
+            len(fixed_step_distances), dtype=bool
+        )
+        fixed_midpoint_fungus_edge_distance = np.full(
+            len(fixed_step_distances), np.nan
+        )
+        if fixed_accepted_steps.any():
+            fixed_midpoints = (
+                fixed_effective[:-1] + fixed_effective[1:]
+            ) / 2.0
+            fixed_midpoint_on_fungus[fixed_accepted_steps] = (
+                points_inside_polygon(
+                    fixed_midpoints[fixed_accepted_steps],
+                    secondary_roi,
+                )
+            )
+            fixed_midpoint_fungus_edge_distance[fixed_accepted_steps] = (
+                distance_to_polygon_boundary(
+                    fixed_midpoints[fixed_accepted_steps],
+                    secondary_roi,
+                )
+            )
+        fixed_steps_in_fungus_buffer = (
+            fixed_accepted_steps
+            & fixed_midpoint_on_fungus
+            & (
+                fixed_midpoint_fungus_edge_distance
+                <= fungus_buffer_px
+            )
+        )
+        fixed_steps_in_fungus_interior = (
+            fixed_accepted_steps
+            & fixed_midpoint_on_fungus
+            & (
+                fixed_midpoint_fungus_edge_distance
+                > fungus_buffer_px
+            )
+        )
+        fixed_buffer_distance = ""
+        fixed_interior_distance = ""
+        if fixed_accepted_steps.any():
+            fixed_buffer_distance = float(
+                fixed_step_distances[fixed_steps_in_fungus_buffer].sum()
+            )
+            fixed_interior_distance = float(
+                fixed_step_distances[fixed_steps_in_fungus_interior].sum()
+            )
+        output.update(
+            {
+                "post_wake_3600_frames_in_fungus_edge_buffer": int(
+                    fixed_in_fungus_buffer.sum()
+                ),
+                "post_wake_3600_frames_in_fungus_interior": int(
+                    fixed_in_fungus_interior.sum()
+                ),
+                "post_wake_3600_distance_px_in_fungus_edge_buffer": (
+                    fixed_buffer_distance
+                ),
+                "post_wake_3600_distance_px_in_fungus_interior": (
+                    fixed_interior_distance
+                ),
+            }
+        )
+        assert (
+            output["post_wake_3600_frames_in_fungus_edge_buffer"]
+            + output["post_wake_3600_frames_in_fungus_interior"]
+            == output["post_wake_3600_frames_on_fungus"]
+        )
+        if output["post_wake_3600_distance_px_on_fungus"] != "":
+            assert math.isclose(
+                output["post_wake_3600_distance_px_in_fungus_edge_buffer"]
+                + output["post_wake_3600_distance_px_in_fungus_interior"],
+                output["post_wake_3600_distance_px_on_fungus"],
+                rel_tol=1e-10,
+                abs_tol=1e-8,
+            )
+
+    if not is_fight:
+        output.update(
+            {
+                "post_wake_3600_social_analysis_status": (
+                    "NOT_APPLICABLE_NOT_FIGHT"
+                ),
+                "post_wake_3600_frames_within_social_distance": "",
+                "post_wake_3600_distance_moved_px_while_within_social_distance": "",
+                "post_wake_3600_social_disappearance_frames": "",
+                "post_wake_3600_social_return_interaction_events": "",
+            }
+        )
+    elif social is None or social["status"] != "CALCULATED_FIGHT_TWO_ANIMALS":
+        output.update(
+            {
+                "post_wake_3600_social_analysis_status": (
+                    "NOT_CALCULATED_EXPECTED_TWO_ANIMALS"
+                ),
+                "post_wake_3600_frames_within_social_distance": "",
+                "post_wake_3600_distance_moved_px_while_within_social_distance": "",
+                "post_wake_3600_social_disappearance_frames": "",
+                "post_wake_3600_social_return_interaction_events": "",
+            }
+        )
+    else:
+        fixed_within = np.asarray(
+            social["within_mask"][frame_slice], dtype=bool
+        )
+        fixed_social_steps = (
+            fixed_accepted_steps
+            & fixed_within[:-1]
+            & fixed_within[1:]
+        )
+        fixed_social = compute_social_candidates(
+            social_all_xy[frame_slice],
+            social_distance_threshold_px=social_distance_threshold_px,
+            eligible_missing_mask=social_all_missing_mask[frame_slice],
+        )
+        output.update(
+            {
+                "post_wake_3600_social_analysis_status": (
+                    "CALCULATED_FIGHT_TWO_ANIMALS"
+                ),
+                "post_wake_3600_frames_within_social_distance": int(
+                    fixed_within.sum()
+                ),
+                "post_wake_3600_distance_moved_px_while_within_social_distance": (
+                    float(fixed_step_distances[fixed_social_steps].sum())
+                ),
+                "post_wake_3600_social_disappearance_frames": int(
+                    focal_social_disappearance_mask[frame_slice].sum()
+                ),
+                "post_wake_3600_social_return_interaction_events": int(
+                    fixed_social["return_events"]
+                ),
+            }
+        )
+
+    fixed_turtling_mask = np.asarray(
+        turtling_result["mask"][frame_slice], dtype=bool
+    )
+    fixed_turtling_frames = int(fixed_turtling_mask.sum())
+    output.update(
+        {
+            "post_wake_3600_turtling_candidate_frames": (
+                fixed_turtling_frames
+            ),
+            "post_wake_3600_turtling_candidate_proportion_of_detected_frames": (
+                fixed_turtling_frames / int(fixed_original_valid.sum())
+                if fixed_original_valid.any()
+                else ""
+            ),
+            "post_wake_3600_turtling_candidate_events": len(
+                _events_from_mask(fixed_turtling_mask)
+            ),
+            "post_wake_3600_turtling_detector_status": (
+                turtling_result["status"]
+            ),
+        }
+    )
+    return output
+
+
 def compute_turtling_candidates(
     xy: np.ndarray,
     window_frames: int = 120,
@@ -1000,6 +1403,78 @@ def compute_turtling_candidates(
         "events": _events_from_mask(candidate_mask),
         "status": "CALCULATED_PROVISIONAL_CENTROID_PATH_CANDIDATES",
     }
+
+
+def compute_wake_threshold_result(
+    observed_xy: np.ndarray,
+    *,
+    analysis_start_global_frame: int,
+    movement_threshold_px: float,
+    one_frame_jump_threshold_px: float,
+) -> dict:
+    """Apply the exact-start, continuous-chain wake threshold rule once."""
+    observed_xy = np.asarray(observed_xy, dtype=float)
+    valid = np.isfinite(observed_xy).all(axis=1)
+    result = {
+        "crossing": "",
+        "latency": "",
+        "baseline_x": "",
+        "baseline_y": "",
+        "status": "OK",
+        "warning": "",
+    }
+    if not valid[0]:
+        result.update(
+            {
+                "status": "NOT_CALCULATED",
+                "warning": (
+                    "The coordinate at the exact analysis-entry frame is "
+                    "missing; no later frame was substituted and no latency "
+                    "was calculated."
+                ),
+            }
+        )
+        return result
+
+    differences = observed_xy[1:] - observed_xy[:-1]
+    step_distances = np.sqrt(np.sum(differences ** 2, axis=1))
+    valid_steps = valid[:-1] & valid[1:]
+    accepted_steps = (
+        valid_steps & (step_distances <= one_frame_jump_threshold_px)
+    )
+    reachable = np.zeros(len(observed_xy), dtype=bool)
+    reachable[0] = True
+    for frame_offset in range(1, len(observed_xy)):
+        reachable[frame_offset] = (
+            reachable[frame_offset - 1]
+            and accepted_steps[frame_offset - 1]
+        )
+
+    baseline = observed_xy[0]
+    result["baseline_x"] = float(baseline[0])
+    result["baseline_y"] = float(baseline[1])
+    displacement = np.full(len(observed_xy), np.nan)
+    displacement[valid] = np.sqrt(
+        np.sum((observed_xy[valid] - baseline) ** 2, axis=1)
+    )
+    hits = np.flatnonzero(
+        (displacement >= movement_threshold_px) & reachable
+    )
+    if hits.size:
+        latency = int(hits[0])
+        result["latency"] = latency
+        result["crossing"] = analysis_start_global_frame + latency
+    else:
+        result.update(
+            {
+                "status": "THRESHOLD_NOT_REACHED",
+                "warning": (
+                    "Threshold was not reached through a continuous sequence "
+                    "of valid steps at or below the one-frame jump threshold."
+                ),
+            }
+        )
+    return result
 
 
 def analyze(
@@ -1167,6 +1642,30 @@ def analyze(
                 starting_sides = ["LEFT", "RIGHT"]
             else:
                 starting_sides = ["RIGHT", "LEFT"]
+    wake_results = [
+        compute_wake_threshold_result(
+            jump_filtered_arr[:, animal, :],
+            analysis_start_global_frame=start,
+            movement_threshold_px=threshold,
+            one_frame_jump_threshold_px=one_frame_jump_threshold_px,
+        )
+        for animal in range(window_arr.shape[1])
+    ]
+    fight_fixed_anchor_offset = None
+    fight_fixed_unavailable_status = ""
+    if is_fight:
+        if window_arr.shape[1] != 2:
+            fight_fixed_unavailable_status = (
+                "NOT_CALCULATED_FIGHT_REQUIRES_EXACTLY_TWO_ANIMALS"
+            )
+        elif any(result["latency"] == "" for result in wake_results):
+            fight_fixed_unavailable_status = (
+                "NOT_CALCULATED_ONE_OR_BOTH_ANIMALS_NO_WAKE_FRAME"
+            )
+        else:
+            fight_fixed_anchor_offset = max(
+                int(result["latency"]) for result in wake_results
+            )
     output = []
     for individual in range(window_arr.shape[1]):
         raw_observed_xy = window_arr[:, individual, :]
@@ -1176,65 +1675,21 @@ def analyze(
         xy = calculation_arr[:, individual, :]
         valid = np.isfinite(xy).all(axis=1)
         warning = ""
-        crossing = ""
-        latency = ""
-        baseline_x = ""
-        baseline_y = ""
-        status = "OK"
+        wake_result = wake_results[individual]
+        crossing = wake_result["crossing"]
+        latency = wake_result["latency"]
+        baseline_x = wake_result["baseline_x"]
+        baseline_y = wake_result["baseline_y"]
+        status = wake_result["status"]
         warnings = []
+        if wake_result["warning"]:
+            warnings.append(wake_result["warning"])
         if trajectory_source_kind.startswith("IDTRACKER_RAW_"):
             warnings.append(
                 "RAW_IDTRACKER_INPUT: no validated/without-gaps trajectory "
                 "was available. Original missing counts are preserved; "
                 "remaining invalid distance steps are excluded without gap bridging."
             )
-
-        original_differences = observed_xy[1:] - observed_xy[:-1]
-        original_step_distances = np.sqrt(
-            np.sum(original_differences ** 2, axis=1)
-        )
-        original_valid_steps = original_valid[:-1] & original_valid[1:]
-        original_accepted_steps = (
-            original_valid_steps
-            & (original_step_distances <= one_frame_jump_threshold_px)
-        )
-        latency_reachable = np.zeros(len(observed_xy), dtype=bool)
-        if original_valid[0]:
-            latency_reachable[0] = True
-            for frame_offset in range(1, len(observed_xy)):
-                latency_reachable[frame_offset] = (
-                    latency_reachable[frame_offset - 1]
-                    and original_accepted_steps[frame_offset - 1]
-                )
-
-        if not original_valid[0]:
-            status = "NOT_CALCULATED"
-            warnings.append(
-                "The coordinate at the exact analysis-entry frame is missing; "
-                "no later frame was substituted and no latency was calculated."
-            )
-        else:
-            baseline = observed_xy[0]
-            baseline_x, baseline_y = float(baseline[0]), float(baseline[1])
-            displacement = np.full(len(observed_xy), np.nan)
-            displacement[original_valid] = np.sqrt(
-                np.sum(
-                    (observed_xy[original_valid] - baseline) ** 2,
-                    axis=1,
-                )
-            )
-            hits = np.flatnonzero(
-                (displacement >= threshold) & latency_reachable
-            )
-            if hits.size:
-                latency = int(hits[0])
-                crossing = start + latency
-            else:
-                status = "THRESHOLD_NOT_REACHED"
-                warnings.append(
-                    "Threshold was not reached through a continuous sequence "
-                    "of valid steps at or below the one-frame jump threshold."
-                )
 
         differences = xy[1:] - xy[:-1]
         step_distances = np.sqrt(np.sum(differences ** 2, axis=1))
@@ -1564,6 +2019,79 @@ def analyze(
                 wall_buffer_px=wall_buffer_px,
                 is_fight=is_fight,
             )
+        fixed_anchor_rule = (
+            "BOTH_ANIMALS_WAKE_LATER_CROSSING"
+            if is_fight
+            else "INDIVIDUAL_WAKE_THRESHOLD_CROSSING"
+        )
+        if is_fight:
+            fixed_anchor_offset = fight_fixed_anchor_offset
+            fixed_unavailable_status = fight_fixed_unavailable_status
+        else:
+            fixed_anchor_offset = (
+                int(latency) if latency != "" else None
+            )
+            fixed_unavailable_status = (
+                "NOT_CALCULATED_INVALID_BASELINE"
+                if not original_valid[0]
+                else "NOT_CALCULATED_THRESHOLD_NOT_REACHED"
+            )
+        if fixed_anchor_offset is None:
+            post_wake_3600 = blank_post_wake_3600_metrics(
+                fixed_unavailable_status,
+                is_fight=is_fight,
+                anchor_rule=fixed_anchor_rule,
+            )
+        elif (
+            fixed_anchor_offset + POST_WAKE_FIXED_INTERVALS
+            >= len(window_arr)
+        ):
+            post_wake_3600 = blank_post_wake_3600_metrics(
+                "NOT_CALCULATED_COMPLETE_3600_FRAME_WINDOW_DOES_NOT_FIT",
+                is_fight=is_fight,
+                anchor_rule=fixed_anchor_rule,
+            )
+        else:
+            if (
+                is_fight
+                and social is not None
+                and social["status"] == "CALCULATED_FIGHT_TWO_ANIMALS"
+            ):
+                focal_disappearance_mask = social[
+                    "disappearance_masks_by_animal"
+                ][:, individual]
+            else:
+                focal_disappearance_mask = np.zeros(
+                    len(window_arr), dtype=bool
+                )
+            focal_imputed_mask = (
+                focal_disappearance_mask
+                if use_social_disappearance_in_calculations and is_fight
+                else np.zeros(len(window_arr), dtype=bool)
+            )
+            post_wake_3600 = compute_post_wake_3600_metrics(
+                effective_xy=xy,
+                raw_xy=raw_observed_xy,
+                original_xy=observed_xy,
+                start_offset=int(fixed_anchor_offset),
+                analysis_start_global_frame=start,
+                step_distances=step_distances,
+                accepted_steps=accepted_steps,
+                rejected_jump_steps=jump_qc["rejected_step_mask"],
+                primary_roi=primary_roi,
+                secondary_roi=secondary_roi,
+                wall_buffer_px=wall_buffer_px,
+                fungus_buffer_px=fungus_buffer_px,
+                is_fight=is_fight,
+                anchor_rule=fixed_anchor_rule,
+                social=social,
+                social_all_xy=jump_filtered_arr,
+                social_all_missing_mask=raw_missing_mask,
+                focal_social_disappearance_mask=focal_disappearance_mask,
+                social_distance_threshold_px=social_distance_threshold_px,
+                imputed_mask=focal_imputed_mask,
+                turtling_result=turtling_result,
+            )
         warning = " ".join(warnings)
 
         output.append(
@@ -1589,6 +2117,7 @@ def analyze(
                 ),
                 "jump_qc_status": jump_qc["status"],
                 **post_wake,
+                **post_wake_3600,
                 "wall_buffer_px": wall_buffer_px,
                 "frames_inside_wall_buffer": frames_in_wall,
                 "frames_outside_wall_buffer": frames_outside_wall,

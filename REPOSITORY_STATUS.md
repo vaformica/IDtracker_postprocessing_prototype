@@ -16,6 +16,10 @@ This repository is the standalone IDtracker post-processing prototype.
   explicit standalone version/changelog files.
 - `v0.2.0` adds explicit remaining-missing and video-year columns plus the
   provisional, review-required tight-loop turtling candidate detector.
+- `v0.6.0` establishes step-level 200-pixel jump QC and variable-length
+  opportunity-adjusted post-wake measures.
+- `v0.7.0` adds the fixed 3600-interval post-wake comparison block, using each
+  BA animal's wake or the later of both fight-animal wakes.
 
-The automated suite contains 28 tests. Firebird execution remains a separate
+The automated suite contains 55 tests. Firebird execution remains a separate
 validation step and is not implied by local test success.

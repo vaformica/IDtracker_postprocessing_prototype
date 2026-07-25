@@ -216,6 +216,23 @@ the full-window metrics. BA fungus and joint fields are blank with an explicit
 `NOT_APPLICABLE_NOT_FIGHT` status. If wake is not reached or the exact baseline
 is invalid, post-wake numeric fields are blank rather than zero.
 
+The CSV also contains a separate, fixed-length `post_wake_3600_*` block. It
+does not replace the wake-through-end fields above. For a BA animal, the fixed
+block begins at that animal's threshold-crossing frame. For a two-animal fight,
+both rows begin at the later of the two crossing frames, so the two animals are
+compared over the same interval after both have awakened. The inclusive range
+contains 3600 adjacent-frame intervals and 3601 coordinate observations. A
+complete interval is required; if either fight animal has no wake frame or the
+fixed end would exceed the approved analysis end, the fixed-window numeric
+fields are blank with an explicit status. The block repeats the total,
+wall/open, fight-only fungus, and direct open-and-off-fungus measures and their
+valid-step denominators, including the fungus edge-buffer/interior partition.
+It also reports fixed-window social contact,
+social-disappearance, return-interaction, substitution/missingness, and
+provisional turtling summaries. Global thresholds and switch settings remain
+single-copy columns elsewhere in the row to avoid redundant provenance
+columns. “3600” is calculated strictly as frames, not seconds.
+
 Wall-buffer outputs use primary `roi_list[0]` and a GUI-configurable inward
 buffer (default 30 pixels). Frame classifications use centroids; distance
 classifications use segment midpoints. `spatial_partition_status` checks that

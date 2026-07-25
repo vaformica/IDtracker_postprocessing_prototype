@@ -939,6 +939,284 @@ class ProcessorTests(unittest.TestCase):
                 animal0["post_wake_open_off_fungus_analysis_status"], "PASS"
             )
 
+    def test_ba_fixed_3600_window_starts_at_individual_wake(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "session.json").write_text(
+                json.dumps(
+                    {
+                        "roi_list": [
+                            "+ Polygon [[-100, -100], [10000, -100], "
+                            "[10000, 100], [-100, 100]]"
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((7220, 1, 2), dtype=float)
+            arr[10:7211, 0, 0] = np.arange(7201, dtype=float)
+            np.save(trajectory, arr)
+            row = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=7200,
+                threshold=30,
+                wall_buffer_px=10,
+                analysis_type="ba",
+            )[0]
+            self.assertEqual(row["latency_to_threshold_frames"], 30)
+            self.assertEqual(
+                row["post_wake_3600_anchor_rule"],
+                "INDIVIDUAL_WAKE_THRESHOLD_CROSSING",
+            )
+            self.assertEqual(row["post_wake_3600_start_global_frame"], 40)
+            self.assertEqual(
+                row["post_wake_3600_end_global_frame_inclusive"], 3640
+            )
+            self.assertEqual(row["post_wake_3600_frame_intervals"], 3600)
+            self.assertEqual(
+                row["post_wake_3600_frame_observations_inclusive"], 3601
+            )
+            self.assertEqual(
+                row["post_wake_3600_valid_coordinate_frames"], 3601
+            )
+            self.assertEqual(
+                row["post_wake_3600_valid_movement_steps"], 3600
+            )
+            self.assertAlmostEqual(
+                row["post_wake_3600_total_distance_px"], 3600
+            )
+            self.assertAlmostEqual(
+                row["post_wake_3600_distance_px_per_valid_step"], 1
+            )
+            self.assertEqual(
+                row["post_wake_3600_wall_analysis_status"], "PASS"
+            )
+            self.assertEqual(
+                row["post_wake_3600_fungus_analysis_status"],
+                "NOT_APPLICABLE_NOT_FIGHT",
+            )
+            self.assertEqual(
+                row["post_wake_3600_social_analysis_status"],
+                "NOT_APPLICABLE_NOT_FIGHT",
+            )
+            self.assertEqual(row["post_wake_valid_movement_steps"], 7170)
+
+    def test_fight_fixed_3600_window_uses_later_wake_for_both_rows(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "session.json").write_text(
+                json.dumps(
+                    {
+                        "roi_list": [
+                            "+ Polygon [[-100, -100], [10000, -100], "
+                            "[10000, 200], [-100, 200]]",
+                            "+ Polygon [[1000, -50], [2000, -50], "
+                            "[2000, 150], [1000, 150]]",
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((7220, 2, 2), dtype=float)
+            offsets = np.arange(7201, dtype=float)
+            arr[10:7211, 0, 0] = offsets
+            arr[10:7211, 1, 0] = 10 + offsets / 10
+            arr[10:7211, 1, 1] = 50
+            np.save(trajectory, arr)
+            rows = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=7200,
+                threshold=30,
+                wall_buffer_px=10,
+                analysis_type="fight",
+            )
+            self.assertEqual(
+                [row["latency_to_threshold_frames"] for row in rows],
+                [30, 300],
+            )
+            for row in rows:
+                self.assertEqual(
+                    row["post_wake_3600_anchor_rule"],
+                    "BOTH_ANIMALS_WAKE_LATER_CROSSING",
+                )
+                self.assertEqual(
+                    row["post_wake_3600_start_global_frame"], 310
+                )
+                self.assertEqual(
+                    row["post_wake_3600_end_global_frame_inclusive"], 3910
+                )
+                self.assertEqual(
+                    row["post_wake_3600_valid_movement_steps"], 3600
+                )
+                self.assertEqual(
+                    row["post_wake_3600_fungus_analysis_status"], "PASS"
+                )
+                self.assertEqual(
+                    row["post_wake_3600_frames_in_fungus_edge_buffer"]
+                    + row["post_wake_3600_frames_in_fungus_interior"],
+                    row["post_wake_3600_frames_on_fungus"],
+                )
+                self.assertAlmostEqual(
+                    row[
+                        "post_wake_3600_distance_px_in_fungus_edge_buffer"
+                    ]
+                    + row[
+                        "post_wake_3600_distance_px_in_fungus_interior"
+                    ],
+                    row["post_wake_3600_distance_px_on_fungus"],
+                )
+            self.assertAlmostEqual(
+                rows[0]["post_wake_3600_total_distance_px"], 3600
+            )
+            self.assertAlmostEqual(
+                rows[1]["post_wake_3600_total_distance_px"], 360
+            )
+
+    def test_fight_fixed_3600_social_counts_use_common_window(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((7220, 2, 2), dtype=float)
+            arr[10:7211, 0, :] = [31, 0]
+            arr[10:7211, 1, :] = [41, 0]
+            arr[10, 0, :] = [0, 0]
+            arr[10, 1, :] = [10, 0]
+            arr[21:31, 1, :] = [150, 0]
+            arr[41:46, 0, :] = np.nan
+            np.save(trajectory, arr)
+            rows = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=7200,
+                threshold=30,
+                analysis_type="fight",
+                use_social_disappearance_in_calculations=True,
+            )
+            for row in rows:
+                self.assertEqual(
+                    row["post_wake_3600_start_global_frame"], 11
+                )
+                self.assertEqual(
+                    row["post_wake_3600_social_analysis_status"],
+                    "CALCULATED_FIGHT_TWO_ANIMALS",
+                )
+                self.assertEqual(
+                    row["post_wake_3600_social_return_interaction_events"], 1
+                )
+            self.assertEqual(
+                rows[0]["post_wake_3600_social_disappearance_frames"], 5
+            )
+            self.assertEqual(
+                rows[0][
+                    "post_wake_3600_social_disappearance_imputed_frames"
+                ],
+                5,
+            )
+            self.assertEqual(
+                rows[0][
+                    "post_wake_3600_remaining_missing_coordinate_frames_after_social_substitution"
+                ],
+                0,
+            )
+
+    def test_fixed_3600_metrics_blank_if_wake_missing_or_window_too_short(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((7220, 1, 2), dtype=float)
+            arr[10:7211, 0, 0] = np.arange(7201, dtype=float) / 100
+            np.save(trajectory, arr)
+            no_wake = analyze(
+                trajectory, root, 10, 7200, threshold=1000
+            )[0]
+            self.assertEqual(
+                no_wake["post_wake_3600_analysis_status"],
+                "NOT_CALCULATED_THRESHOLD_NOT_REACHED",
+            )
+            self.assertEqual(no_wake["post_wake_3600_total_distance_px"], "")
+
+            arr[10:7211, 0, 0] = np.arange(7201, dtype=float) / 1000
+            arr[3710:7211, 0, 0] += 30
+            np.save(trajectory, arr)
+            late_wake = analyze(
+                trajectory, root, 10, 7200, threshold=30
+            )[0]
+            self.assertGreater(
+                late_wake["latency_to_threshold_frames"], 3600
+            )
+            self.assertEqual(
+                late_wake["post_wake_3600_analysis_status"],
+                "NOT_CALCULATED_COMPLETE_3600_FRAME_WINDOW_DOES_NOT_FIT",
+            )
+            self.assertEqual(
+                late_wake["post_wake_3600_valid_movement_steps"], ""
+            )
+
+    def test_fixed_fungus_frames_remain_available_without_valid_steps(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "session.json").write_text(
+                json.dumps(
+                    {
+                        "roi_list": [
+                            "+ Polygon [[-100, -100], [500, -100], "
+                            "[500, 100], [-100, 100]]",
+                            "+ Polygon [[-50, -50], [50, -50], "
+                            "[50, 50], [-50, 50]]",
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((7220, 2, 2), dtype=float)
+            arr[10, 0, :] = [0, 0]
+            arr[10, 1, :] = [10, 0]
+            for offset in range(1, 7201):
+                x0 = 30 if offset == 1 else (300 if offset % 2 == 0 else 0)
+                arr[10 + offset, 0, :] = [x0, 0]
+                arr[10 + offset, 1, :] = [x0 + 10, 0]
+            np.save(trajectory, arr)
+            rows = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=7200,
+                threshold=30,
+                analysis_type="fight",
+            )
+            for row in rows:
+                self.assertEqual(
+                    row["post_wake_3600_analysis_status"],
+                    "NOT_CALCULATED_NO_VALID_MOVEMENT_STEPS",
+                )
+                self.assertEqual(
+                    row["post_wake_3600_valid_movement_steps"], 0
+                )
+                self.assertEqual(row["post_wake_3600_total_distance_px"], "")
+                self.assertNotEqual(
+                    row["post_wake_3600_frames_on_fungus"], ""
+                )
+                self.assertEqual(
+                    row[
+                        "post_wake_3600_distance_px_in_fungus_edge_buffer"
+                    ],
+                    "",
+                )
+                self.assertEqual(
+                    row[
+                        "post_wake_3600_distance_px_in_fungus_interior"
+                    ],
+                    "",
+                )
+
     def test_fight_start_side_is_unassigned_when_start_coordinate_missing(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)

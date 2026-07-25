@@ -27,6 +27,17 @@ that remain ambiguous. Items in the second section are **not implemented**.
 - Post-wake wall, fungus, and direct open-and-off-fungus summaries include both
   opportunity-adjusted distance and conditional speed fields with explicit
   partition statuses. BA fungus/joint fields are explicitly not applicable.
+- A separate fixed `post_wake_3600_*` block retains the same accepted-step and
+  ROI geometry while limiting the comparison to 3600 frame intervals (3601
+  inclusive observations). BA rows start at the focal animal's wake crossing.
+  Both rows of a two-animal fight start at the later crossing so the animals
+  share one interval after both have awakened. Incomplete or undefined fixed
+  windows are blank with explicit statuses.
+- The fixed block also restricts social contact, social disappearance,
+  together-separate-together return events, social substitutions/missingness,
+  and provisional turtling summaries to that range. Turtling time on fungus
+  remains in the proportion denominator but is excluded from the candidate
+  numerator.
 - A parsed `video_year` column is populated only for recognized 2025 and 2026
   recording dates.
 - Fight-only social-distance summaries use one GUI threshold, default 60
@@ -93,6 +104,14 @@ per elapsed frame.
 
 This still uses the first crossing rather than a sustained crossing because the
 sustained run-length rule remains unresolved.
+
+The additional fixed comparison uses the same provisional first crossing. For
+BA animal \(i\), the fixed anchor is \(C_i\). For a two-animal fight, both rows
+use \(C_{\mathrm{both}} = \max(C_0, C_1)\). The fixed inclusive end is
+\(C + 3600\). Therefore, each calculated fixed range contains 3600 possible
+adjacent movement opportunities but 3601 coordinate observations. The actual
+valid-step denominator can be smaller because missing coordinates and rejected
+jumps are not bridged.
 
 ### 4. Open-area summaries — implemented definitions
 

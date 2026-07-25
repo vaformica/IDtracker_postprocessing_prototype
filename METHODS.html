@@ -13,7 +13,7 @@ table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8
 </style>
 </head>
 <body>
-<h1>Standalone IDtracker.ai post-processing: version 0.6.0</h1>
+<h1>Standalone IDtracker.ai post-processing: version 0.7.0</h1>
 <p>This document describes every calculation performed by <code>processor.py</code>.
 The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
 
@@ -252,6 +252,63 @@ crossing exists or the exact baseline is invalid, every post-wake numeric is
 blank, not zero, and <code>post_wake_analysis_status</code> gives the reason.
 For BA rows, fungus and joint numeric fields are blank and their statuses are
 <code>NOT_APPLICABLE_NOT_FIGHT</code>.</p>
+
+<h2>Fixed 3600-frame-interval post-wake calculations</h2>
+<p>The <code>post_wake_3600_*</code> columns are a second analysis block; they
+do not replace the wake-through-end columns above. The processor performs no
+conversion to seconds. “3600” always means exactly 3600 adjacent-frame
+intervals, with both endpoints included as 3601 coordinate observations.</p>
+<p>For BA animal <em>i</em>, the fixed-window anchor is its own threshold
+crossing <em>C</em><sub>i</sub>. For a fight containing exactly two animals,
+the common anchor is the later crossing:</p>
+<p class="formula">
+C<sup>both</sup> = max(C<sub>0</sub>, C<sub>1</sub>).
+</p>
+<p>Both fight rows therefore use the identical inclusive global range
+<em>C</em><sup>both</sup> through
+<em>C</em><sup>both</sup>+3600. This begins only after both animals have
+crossed the wake threshold. The CSV records the rule, global start, global
+inclusive end, interval count, and observation count. A complete range is
+required. If a BA animal has no valid crossing, either fight animal has no
+valid crossing, the fight does not contain exactly two animals, or the
+inclusive fixed end exceeds the approved analysis end, all affected fixed
+numeric results are blank rather than zero and
+<code>post_wake_3600_analysis_status</code> states why.</p>
+<p>Within that fixed range, total, wall/open, fight-only fungus on/off and
+fungus edge-buffer/interior, and direct open-and-off-fungus results use exactly
+the same equations, accepted
+adjacent steps, segment midpoints, missing-gap rules, 200-pixel jump rule, and
+additivity assertions documented for the variable wake-through-end block.
+Thus, for an available fixed window <em>H</em>,</p>
+<p class="formula">
+N<sup>3600</sup><sub>i</sub> =
+∑<sub>f=H</sub><sup>H+3599</sup> A<sub>i,f</sub>,
+&nbsp;&nbsp;
+D<sup>3600</sup><sub>i</sub> =
+∑<sub>f=H</sub><sup>H+3599</sup>
+A<sub>i,f</sub>s<sub>i,f</sub>.
+</p>
+<p><code>post_wake_3600_distance_px_per_valid_step</code> is
+<em>D</em><sup>3600</sup>/<em>N</em><sup>3600</sup>. The denominator can be
+less than 3600 because original missing coordinates and rejected jumps remove
+movement opportunities without bridging them.</p>
+<p>The fixed block also reports social and turtling screening summaries. Social
+within-distance frames and animal-specific social movement distance are
+restricted to the common fight range. A disappearance frame is counted in the
+fixed block when that frame lies in a disappearance run classified using the
+full approved analysis-window context; this preserves valid entry or
+reappearance evidence just outside a fixed boundary. Visible
+together-separate-together return events are recalculated entirely within the
+fixed range, so all three phases must be observable there. Turtling candidates
+are first classified with the documented full-analysis sliding-window
+detector, including the fight fungus exclusion, and then candidate frames are
+counted only when they fall inside the fixed range. Its proportion denominator
+is all originally detected coordinate frames in the fixed range, including
+real time on fungus where the animal is not counted as turtling.</p>
+<p>Thresholds and the social-substitution switch are not duplicated with a
+<code>post_wake_3600_</code> prefix. Their existing single-copy CSV columns are
+the provenance for both the full and fixed calculations. The PDF generator is
+unchanged by this release.</p>
 
 <h2>Primary-ROI wall buffer</h2>
 <p>The primary arena is <code>roi_list[0]</code> from the canonical
@@ -527,6 +584,24 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>post_wake_open_off_fungus_proportion</td><td>Fight-only direct joint frames divided by valid post-wake coordinate frames.</td></tr>
 <tr><td>post_wake_open_off_fungus_distance_px_per_available_step</td><td>Fight-only direct joint distance divided by all valid post-wake movement steps.</td></tr>
 <tr><td>post_wake_speed_px_per_open_off_fungus_step</td><td>Fight-only direct joint distance divided only by joint-classified steps.</td></tr>
+<tr><td>post_wake_3600_analysis_status</td><td>Availability/result status for the complete fixed 3600-interval block; unavailable results are blank rather than zero.</td></tr>
+<tr><td>post_wake_3600_anchor_rule</td><td>INDIVIDUAL_WAKE_THRESHOLD_CROSSING for BA or BOTH_ANIMALS_WAKE_LATER_CROSSING for a two-animal fight.</td></tr>
+<tr><td>post_wake_3600_start_global_frame, post_wake_3600_end_global_frame_inclusive</td><td>Exact inclusive global boundaries of the fixed block.</td></tr>
+<tr><td>post_wake_3600_frame_intervals, post_wake_3600_frame_observations_inclusive</td><td>Exactly 3600 adjacent-frame intervals and 3601 included coordinate observations for every calculated fixed block.</td></tr>
+<tr><td>post_wake_3600_valid_coordinate_frames, post_wake_3600_missing_coordinate_frames</td><td>Effective finite coordinates and original IDtracker missing coordinates inside the fixed range.</td></tr>
+<tr><td>post_wake_3600_valid_movement_steps, post_wake_3600_jump_excluded_steps</td><td>Accepted adjacent-step opportunities and steps rejected for exceeding the configured one-frame jump threshold.</td></tr>
+<tr><td>post_wake_3600_total_distance_px, post_wake_3600_distance_px_per_valid_step</td><td>Accepted total distance and that distance divided by accepted fixed-window movement steps.</td></tr>
+<tr><td>post_wake_3600_*wall*, post_wake_3600_*open*</td><td>Fixed-window wall/open frame, distance, step, proportion, per-available-step, and conditional-speed measures using centroid and midpoint geometry.</td></tr>
+<tr><td>post_wake_3600_*fungus*, post_wake_3600_*open_and_off_fungus*</td><td>Fight-only fixed-window complementary fungus and direct joint open/off-fungus measures; BA numerics are blank and statuses are not applicable.</td></tr>
+<tr><td>post_wake_3600_frames/distance_px_in_fungus_edge_buffer/interior</td><td>Fight-only fixed-window on-fungus frame and accepted-distance partitions using the configured inward fungus buffer.</td></tr>
+<tr><td>post_wake_3600_frames_within_social_distance</td><td>Fight-only frames in the fixed range with both animals visible and within the single configured social threshold.</td></tr>
+<tr><td>post_wake_3600_distance_moved_px_while_within_social_distance</td><td>Animal-specific accepted movement distance whose two endpoint frames are within range and inside the fixed range.</td></tr>
+<tr><td>post_wake_3600_social_disappearance_frames</td><td>Animal-specific qualifying disappearance frames that fall inside the fixed range; classification may use entry/reappearance evidence from the full approved window.</td></tr>
+<tr><td>post_wake_3600_social_return_interaction_events</td><td>Visible together-separate-together events for which the entire observed sequence occurs inside the fixed range.</td></tr>
+<tr><td>post_wake_3600_social_disappearance_imputed_frames, post_wake_3600_remaining_missing_coordinate_frames_after_social_substitution</td><td>Fixed-range social substitutions actually used and original missing frames still unavailable afterward.</td></tr>
+<tr><td>post_wake_3600_coordinate_frames_used_in_distance_and_location_calculations</td><td>Effective finite centroid frames used for fixed-range distance and location calculations.</td></tr>
+<tr><td>post_wake_3600_turtling_candidate_frames, post_wake_3600_turtling_candidate_events</td><td>Full-detector candidate frames falling inside the fixed range and their contiguous fixed-range runs.</td></tr>
+<tr><td>post_wake_3600_turtling_candidate_proportion_of_detected_frames</td><td>Fixed-range candidate frames divided by originally detected coordinate frames in that range; fight time on fungus remains in the denominator.</td></tr>
 <tr><td>wall_buffer_px</td><td>Inward primary-ROI wall-buffer width.</td></tr>
 <tr><td>frames_inside/outside_wall_buffer</td><td>Valid centroid frames partitioned by the primary-ROI buffer.</td></tr>
 <tr><td>distance_px_inside/outside_wall_buffer</td><td>Valid step distances partitioned using segment midpoints.</td></tr>
