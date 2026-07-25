@@ -1,6 +1,7 @@
 import csv
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
@@ -24,6 +25,10 @@ from processor import (
     write_plot_pdf,
 )
 from jump_audit import audit_manifest
+from combine_results import (
+    COMBINED_LEADING_FIELDS,
+    COMBINED_TRAILING_FIELDS,
+)
 from firebird_gui import (
     App,
     BATCH_SESSION_RESOLVER,
@@ -51,6 +56,32 @@ from firebird_gui import (
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_student_documentation_covers_complete_combined_schema(self):
+        repository = Path(__file__).resolve().parents[1]
+        dictionary_text = (
+            repository / "DATA_DICTIONARY.md"
+        ).read_text(encoding="utf-8")
+        readme_text = (repository / "README.md").read_text(encoding="utf-8")
+        documented_fields = set(
+            re.findall(r"^\| `([^`]+)` \|", dictionary_text, flags=re.M)
+        )
+        expected_fields = set(
+            COMBINED_LEADING_FIELDS
+            + OUTPUT_COLUMNS
+            + COMBINED_TRAILING_FIELDS
+        )
+        self.assertEqual(len(expected_fields), 165)
+        self.assertEqual(
+            expected_fields - documented_fields,
+            set(),
+            "Every combined-results field must be defined in the data dictionary.",
+        )
+        self.assertIn("DATA_DICTIONARY.md", readme_text)
+        self.assertIn(
+            f"Version documented: **{SCRIPT_VERSION}**",
+            dictionary_text,
+        )
+
     def test_reusable_settings_validate_and_preserve_start_provenance(self):
         records = [
             {

@@ -12,6 +12,7 @@ cp "$script_dir/slurm_worker.py" "$install_dir/slurm_worker.py"
 cp "$script_dir/slurm_finalize.py" "$install_dir/slurm_finalize.py"
 cp "$script_dir/METHODS.html" "$install_dir/METHODS.html"
 cp "$script_dir/README.md" "$install_dir/README.md"
+cp "$script_dir/DATA_DICTIONARY.md" "$install_dir/DATA_DICTIONARY.md"
 cp "$script_dir/ANALYSIS_REQUIREMENTS_REVIEW.md" \
   "$install_dir/ANALYSIS_REQUIREMENTS_REVIEW.md"
 

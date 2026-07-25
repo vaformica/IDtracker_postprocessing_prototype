@@ -4,6 +4,26 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.7.2 - 2026-07-25
+
+- Rewrote the beginning of the README as a student-facing guide explaining
+  purpose, scope, history, provenance, scientific cautions, row grain, units,
+  core geometry, worked BA/fight examples, and a downstream-analysis
+  checklist.
+- Added `DATA_DICTIONARY.md`, with a detailed definition, units/type,
+  applicability, and example for every one of the 165 fields in a combined
+  results CSV.
+- Added explicit explanations of frames versus intervals versus movement
+  steps, blank versus zero, status fields, midpoint ROI assignment, jump
+  rejection, social-disappearance substitution, fixed versus variable
+  post-wake windows, and provisional turtling.
+- Centralized the combined CSV leading and trailing metadata field lists and
+  added an automated test that prevents undocumented schema fields from being
+  introduced.
+- Included the data dictionary in the Firebird installation copy.
+- Scientific calculations, the 165-field combined output schema, and PDF
+  content are unchanged from v0.7.1.
+
 ## 0.7.1 - 2026-07-25
 
 - Replaced recursive PDF-folder transfer with one atomic, uncompressed ZIP

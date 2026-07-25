@@ -34,6 +34,7 @@ scp -i "$ssh_key" \
   "$script_dir/combine_results.py" \
   "$script_dir/METHODS.html" \
   "$script_dir/README.md" \
+  "$script_dir/DATA_DICTIONARY.md" \
   "$script_dir/ANALYSIS_REQUIREMENTS_REVIEW.md" \
   "$script_dir/install_firebird.sh" \
   "$ssh_host:$remote_stage/"

@@ -23,6 +23,9 @@ This repository is the standalone IDtracker post-processing prototype.
 - `v0.7.1` transfers PDFs as one verified archive, moves the final alert to
   local-download completion, and reflows GUI actions for laptop widths without
   changing the scientific schema.
+- `v0.7.2` adds a student-facing provenance guide and a comprehensive
+  dictionary for all 165 combined-results fields. Scientific calculations,
+  output fields, and PDFs are unchanged.
 
-The automated suite contains 57 tests. Firebird execution remains a separate
+The automated suite contains 58 tests. Firebird execution remains a separate
 validation step and is not implied by local test success.

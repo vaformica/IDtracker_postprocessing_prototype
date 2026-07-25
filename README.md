@@ -3,6 +3,281 @@
 This is a separate, review-first replacement prototype. It does not import or
 call the legacy post-processing scripts.
 
+## Read this first
+
+This program converts approved IDtracker.ai trajectories into a deliberately
+auditable table of beetle behavior measurements and a matching PDF for visual
+review. It was written for scientific research, where a plausible-looking
+number is not sufficient: the program must also preserve where that number
+came from, which frames were eligible, which steps were rejected, what geometry
+was used, and why a value may be blank.
+
+The two most important companion documents are:
+
+- [`DATA_DICTIONARY.md`](DATA_DICTIONARY.md): the student-facing definition of
+  every column in the per-session and combined CSV schemas, including units,
+  applicability, missing-value meaning, and examples.
+- [`METHODS.html`](METHODS.html): the formal mathematical and geometric
+  specification used to audit the implementation.
+
+Additional provenance is recorded in:
+
+- [`CHANGELOG.md`](CHANGELOG.md): version-by-version history;
+- [`ANALYSIS_REQUIREMENTS_REVIEW.md`](ANALYSIS_REQUIREMENTS_REVIEW.md):
+  implemented scientific definitions and unresolved biological choices;
+- [`REPOSITORY_STATUS.md`](REPOSITORY_STATUS.md): boundaries between this
+  prototype and the production pipeline.
+
+Students should read this README before running the GUI and keep the data
+dictionary open when working with the CSV. Column names such as
+`post_wake_open_distance_px_per_available_step` are intentionally explicit,
+but they encode different numerators and denominators and should not be
+shortened casually in analysis code.
+
+## What one output row represents
+
+The combined CSV is in **long format**:
+
+> One row represents one zero-based IDtracker animal in one approved
+> video/cell/analysis session.
+
+A BA session will normally have one animal row. A Fight session is expected to
+have two rows, one for IDtracker animal 0 and one for IDtracker animal 1. The
+program does not average those fight rows. Biological identity is not inferred
+from the numeric IDtracker animal index. For two-animal fights, `starting_side`
+records which trajectory began on the LEFT or RIGHT at the exact approved
+analysis-start frame so that a later, separately audited metadata workflow can
+connect trajectory identity to a beetle library ID.
+
+The same source video can contribute multiple cell sessions. The same
+video/cell/analysis can also have repeated IDtracker runs. The scanner consults
+the authoritative QC table, keeps approved records only, and selects the newest
+approved record for each `(video, cell, analysis)` key. Folder names, TOML
+files, and the mere existence of an IDtracker output are not approval evidence.
+
+## What the program does
+
+For every selected approved session, the processor:
+
+1. resolves the best available IDtracker trajectory file;
+2. requires a positive researcher-reviewed global analysis start;
+3. extracts one inclusive global-frame analysis window;
+4. identifies the first provisional displacement-threshold crossing;
+5. calculates accepted adjacent-frame movement distance without bridging
+   missing coordinates or rejected jumps;
+6. classifies centroid frames and movement-segment midpoints relative to the
+   primary wall buffer;
+7. for fights, classifies the secondary fungus ROI and its inward buffer;
+8. for two-animal fights, screens social proximity, disappearance, and visible
+   return interactions;
+9. screens provisional tight-loop trajectory patterns that may warrant video
+   review for turtling;
+10. repeats the post-wake movement/location summaries for both the remaining
+    wake-through-end interval and a fixed 3600-frame-interval comparison;
+11. writes one CSV row per tracked animal and one multipage audit PDF per
+    session;
+12. combines only complete session outputs and atomically downloads the CSV and
+    verified PDF collection to the Mac.
+
+## What the program deliberately does not do
+
+The processor does not:
+
+- modify IDtracker trajectory files;
+- add its own interpolation;
+- bridge across missing-coordinate gaps;
+- treat a large rejected jump as real movement;
+- silently replace a missing analysis-start coordinate with a later frame;
+- accept an analysis start of zero;
+- infer a beetle's biological library ID;
+- interpret social proximity as proof of fighting;
+- interpret a tight looping centroid path as proof that a beetle is upside
+  down;
+- invent a sustained wake definition that has not been approved;
+- use seconds in the scientific output;
+- treat blank numeric values as zero;
+- process every run merely because it exists.
+
+## Why this separate prototype exists
+
+An earlier post-processing workflow had accumulated too many columns and some
+calculations whose frame windows, denominators, or geometry were not
+sufficiently explicit. During review with a student collaborator, several
+risks became clear:
+
+- some sessions had an analysis interval beginning at global frame 0, which was
+  a data-entry error rather than a biological start;
+- aggregate distance and latency values could be calculated over mismatched
+  time windows;
+- elapsed frames, valid coordinate observations, and valid adjacent movement
+  opportunities were being treated too casually as if they were the same
+  quantity;
+- wall and fungus allocations needed explicit centroid-versus-midpoint
+  geometry and additivity checks;
+- missing trajectories and apparent jumps caused by tracking disturbances
+  could create visually convincing but biologically impossible straight
+  segments;
+- social disappearance required clear provenance because copying a visible
+  partner's centroid is an explicit biological inference, not a raw
+  observation;
+- provisional turtling detection needed to be conservative and labeled as a
+  candidate screen rather than a posture measurement.
+
+This repository therefore started from a smaller set of definitions, retained
+useful code only where its behavior could be re-audited, and added tests and
+documentation alongside each scientific calculation. It remains separate from
+`One_script_to_rule_them_all` so it can be reviewed and revised without
+silently changing the larger production QC pipeline.
+
+## Short version history and scientific provenance
+
+- **v0.1.x:** established the independent repository, global-frame analysis
+  window, minimal displacement latency, atomic CSV writing, and mathematical
+  methods page.
+- **v0.2.x:** added missing-coordinate provenance, year parsing, and a
+  provisional turtling candidate screen.
+- **v0.3.x:** added script-version provenance, fungus exclusion for fight
+  turtling, completion alerts, and moved processing controls to the Sessions
+  workflow.
+- **v0.4.x:** added SLURM arrays, dependent finalization, combined-batch
+  completeness checks, and automatic timestamped downloads.
+- **v0.5.x:** added explicit trajectory-source priority and raw fallback,
+  social disappearance/optional partner-centroid substitution, a single
+  60-pixel social threshold, jump auditing with researcher-approved start
+  changes, and reusable settings/provenance.
+- **v0.6.0:** corrected jump handling to reject adjacent movement **steps**
+  strictly greater than the researcher-selected 200-pixel threshold while
+  retaining their endpoint coordinates for frame-location summaries. It also
+  added wake-through-end opportunity-adjusted movement measures.
+- **v0.7.0:** added the separate fixed 3600-frame-interval post-wake block. BA
+  rows use the individual animal's wake; both rows of a fight use the later of
+  the two wakes.
+- **v0.7.1:** changed PDF transfer to one verified archive, moved the final
+  chime to actual Mac-download completion, and reorganized the GUI for laptop
+  screens.
+- **v0.7.2:** added this expanded student guide and a field-by-field data
+  dictionary covering all 165 columns in the combined results. Scientific
+  calculations, the output schema, and PDF content did not change.
+
+The changelog is authoritative for the detailed release record. Older output
+files remain scientifically tied to the `script_version` written in each row;
+new columns must not be assumed to exist in an old batch.
+
+## Essential vocabulary
+
+### Global frame
+
+The frame number in the original IDtracker trajectory array. The processor does
+not reset the approved analysis start to frame 0. For example, if
+`analysis_start_frame = 62` and `analysis_timespan_frames = 7200`, then
+`analysis_end_frame_inclusive = 7262`.
+
+### Frame interval versus frame observation
+
+An inclusive range from frame 62 through frame 7262 contains:
+
+- 7200 adjacent-frame intervals; and
+- 7201 frame observations.
+
+That distinction explains why `analysis_timespan_frames` is 7200 while
+`analysis_frame_observations_inclusive` is 7201.
+
+### Coordinate frame
+
+One frame at which the focal animal has a finite x and y centroid. A coordinate
+frame supports a location classification such as inside the wall buffer.
+
+### Movement step
+
+The straight-line Euclidean displacement between two adjacent coordinate
+frames:
+
+```text
+step distance = sqrt((x[f+1] - x[f])^2 + (y[f+1] - y[f])^2)
+```
+
+A valid movement step requires finite effective coordinates at both endpoints
+and a distance at or below the configured one-frame jump threshold. One missing
+coordinate can invalidate the step entering that frame and the step leaving it.
+This is why valid coordinate frames and valid movement steps are related but
+not interchangeable.
+
+### Frame classification versus distance classification
+
+Wall and fungus **frame counts** classify the centroid at a frame. Wall and
+fungus **movement distances** classify the midpoint of the accepted movement
+segment. Midpoint assignment prevents one segment from being partly counted in
+multiple regions and allows exact distance additivity checks.
+
+### Blank, zero, and status
+
+- `0` means the quantity was applicable and calculated as zero.
+- A blank numeric cell means the quantity was not calculated or was not
+  applicable; consult the associated status.
+- `NOT_APPLICABLE_NOT_FIGHT` means a fight-only fungus or social measure was
+  intentionally not defined for a BA.
+- A `FAIL_*` status is a QC finding and should not be converted into a usable
+  value by analysis code.
+
+## Worked miniature example
+
+Suppose a BA analysis begins at global frame 100, uses a 7200-frame interval,
+and crosses the 30-pixel displacement threshold at global frame 400.
+
+```text
+analysis_start_frame                 = 100
+analysis_end_frame_inclusive         = 7300
+analysis_frame_observations_inclusive= 7201
+threshold_crossing_global_frame      = 400
+latency_to_threshold_frames          = 300
+```
+
+The variable wake-through-end block covers frames 400 through 7300. It has
+6900 possible adjacent intervals before missing/jump exclusions. The fixed
+block covers frames 400 through 4000 and always has 3600 possible adjacent
+intervals and 3601 observations when complete.
+
+If the fixed block contains 3580 accepted steps and 17,900 pixels of accepted
+distance:
+
+```text
+post_wake_3600_distance_px_per_valid_step
+    = 17,900 / 3,580
+    = 5.0 pixels per valid adjacent movement opportunity
+```
+
+This is not “pixels per elapsed second,” and it is not the same as total
+distance divided by 3600 when 20 movement opportunities were unavailable.
+
+For a fight in which animal 0 wakes at offset 300 and animal 1 wakes at offset
+700, both fight rows use offset 700 as
+`post_wake_3600_start_global_frame - analysis_start_frame`. This makes the
+fixed fight comparison begin only after both animals have crossed the
+provisional wake threshold.
+
+## Student analysis checklist
+
+Before using a combined CSV:
+
+1. Confirm the expected `script_version`.
+2. Confirm the row grain and count expected animals per session.
+3. Inspect `result_status`, `warning`, and all relevant analysis-status fields.
+4. Do not replace blanks with zero.
+5. Keep BA and Fight rows separate unless a documented biological join is
+   being performed.
+6. Verify the intended window: full analysis, wake-through-end, or fixed 3600.
+7. Use the matching numerator and denominator; never mix a full-window distance
+   with a post-wake denominator.
+8. Treat missingness, rejected jumps, raw trajectory fallback, partition
+   failures, and turtling as QC/provenance.
+9. For fights, verify two rows and review `starting_side` before metadata
+   linkage.
+10. Preserve `qc_record_id`, batch provenance, source paths, and archived start
+    decisions in all derived tables.
+11. Report sample sizes before and after every exclusion.
+12. Keep the original combined CSV unchanged and write cleaned/analysis-ready
+    data to a separate location.
+
 ## Standalone repository
 
 The independent Git repository is:

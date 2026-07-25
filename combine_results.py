@@ -7,29 +7,31 @@ import sys
 from pathlib import Path
 
 
+COMBINED_LEADING_FIELDS = [
+    "cell_label",
+    "video",
+    "analysis_type",
+    "video_year",
+]
+COMBINED_TRAILING_FIELDS = [
+    "qc_record_id",
+    "camera",
+    "camera_id",
+    "recording_date",
+    "recording_time",
+    "act",
+    "processing_batch_id",
+    "processing_created_at",
+    "processing_execution_mode",
+    "source_result_file",
+]
+
+
 def main():
     request = json.load(sys.stdin)
     items = request["items"]
     destination = Path(request["destination"])
     overwrite = bool(request.get("overwrite", False))
-    leading_fields = [
-        "cell_label",
-        "video",
-        "analysis_type",
-        "video_year",
-    ]
-    trailing_fields = [
-        "qc_record_id",
-        "camera",
-        "camera_id",
-        "recording_date",
-        "recording_time",
-        "act",
-        "processing_batch_id",
-        "processing_created_at",
-        "processing_execution_mode",
-        "source_result_file",
-    ]
     rows = []
     base_fields = None
     for item in items:
@@ -84,7 +86,11 @@ def main():
         with temporary.open("x", newline="", encoding="utf-8") as stream:
             writer = csv.DictWriter(
                 stream,
-                fieldnames=leading_fields + base_fields + trailing_fields,
+                fieldnames=(
+                    COMBINED_LEADING_FIELDS
+                    + base_fields
+                    + COMBINED_TRAILING_FIELDS
+                ),
             )
             writer.writeheader()
             writer.writerows(rows)

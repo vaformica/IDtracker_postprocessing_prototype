@@ -1,0 +1,48 @@
+{
+  "artifact_type": "scientific_annotated_review_video",
+  "created_utc": "2026-07-24T21:34:35.908966+00:00",
+  "annotator_script": "/home/vformic1-swat/idtracker_video_review/Camera_2_40359705_20260701_1336_FIGHT_ACT1_B3/annotate_session_video.py",
+  "annotator_script_version": "0.1.0",
+  "video_name": "Camera_2_40359705_20260701_1336_FIGHT_ACT1.mp4",
+  "cell_label": "B3",
+  "analysis_type": "fight",
+  "qc_decision": "APPROVED",
+  "qc_record_id": "Camera_2_40359705_20260701_1336_FIGHT_ACT1_B3_A00001_20260722_071318",
+  "analysis_start_global_frame": 55,
+  "analysis_end_global_frame_inclusive": 7255,
+  "analysis_timespan_frames": 7200,
+  "frames_written": 7201,
+  "frames_per_second": 30.0,
+  "source_video": "/data/labs/vformic1-swat-lab/2026_Videos/2026_Fights/2026_Fights_Recorded/Camera_2_40359705_20260701_1336_FIGHT_ACT1.mp4",
+  "source_video_size_bytes": 19730347620,
+  "trajectory_file": "/data/labs/vformic1-swat-lab/2026_Videos/2026_Fights/2026_Fights_Recorded/session_Camera_2_40359705_20260701_1336_FIGHT_ACT1/trajectories/trajectories.npy",
+  "trajectory_source_kind": "IDTRACKER_RAW_NPY",
+  "trajectory_sha256": "2aca6021382d4ecdcfec528205b0de2bba264998c9eb438fecc2ba80c146099e",
+  "session_folder": "/data/labs/vformic1-swat-lab/2026_Videos/2026_Fights/2026_Fights_Recorded/session_Camera_2_40359705_20260701_1336_FIGHT_ACT1",
+  "session_json_sha256": "c50bd49c100d8ce27c854ee047645783b6984364556f233834e0286b9ab9c99f",
+  "social_disappearance_substitution_enabled": true,
+  "social_distance_threshold_px": 60.0,
+  "social_disappearance_imputed_frames_by_animal": [
+    8,
+    536
+  ],
+  "wall_buffer_px": 30.0,
+  "fungus_buffer_px": 30.0,
+  "potential_turtling_uses_original_coordinates": true,
+  "potential_turtling_excludes_secondary_fungus_roi": true,
+  "potential_turtling_candidate_frames_by_animal": [
+    5,
+    0
+  ],
+  "turtling_defaults": {
+    "window_frames": 120,
+    "min_path_px": 120.0,
+    "max_radius90_px": 35.0,
+    "min_turn_rotations": 3.0,
+    "max_straightness": 0.25,
+    "max_step_px": 20.0
+  },
+  "output_video": "Camera_2_40359705_20260701_1336_FIGHT_ACT1_B3_annotated_social_on.mp4",
+  "output_video_sha256": "71ba2253f9083553089e54f0d1489e4f15a414b3a6a9f5912a06e81c7d1b3c1e",
+  "interpretation_warning": "Potential turtling is a provisional centroid-path candidate, not proof of upside-down posture."
+}

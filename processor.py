@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCRIPT_VERSION = "0.7.1"
+SCRIPT_VERSION = "0.7.2"
 POST_WAKE_FIXED_INTERVALS = 3600
 
 IDTRACKER_TRAJECTORY_SOURCES = {
