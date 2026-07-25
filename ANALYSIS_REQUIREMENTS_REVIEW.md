@@ -15,6 +15,12 @@ that remain ambiguous. Items in the second section are **not implemented**.
 - Missing-coordinate counts and explicit non-result statuses.
 - Original missing frames, social-disappearance substitutions, and remaining
   unusable coordinate frames are reported separately.
+- Adjacent movement steps strictly greater than the GUI jump threshold
+  (default 50 pixels) initiate coordinate-level QC. A returning excursion is
+  excluded through the frame before return; a persistent relocation excludes
+  the remainder and is flagged for Jump Audit start review. Excluded
+  coordinates contribute to no latency, distance, wall, fungus, social, or
+  turtling calculation. Raw IDtracker files remain untouched.
 - A parsed `video_year` column is populated only for recognized 2025 and 2026
   recording dates.
 - Fight-only social-distance summaries use one GUI threshold, default 60

@@ -13,7 +13,7 @@ table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8
 </style>
 </head>
 <body>
-<h1>Standalone IDtracker.ai post-processing: version 0.4.0</h1>
+<h1>Standalone IDtracker.ai post-processing: version 0.5.0</h1>
 <p>This document describes every calculation performed by <code>processor.py</code>.
 The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
 
@@ -33,6 +33,22 @@ inclusive global end frame. Both the start and end frames are analyzed.</p>
 inclusive end frame of 7262. This represents 7200 intervals between frames and
 7201 frame observations. The mathematical notation for this convention is
 collected in the appendix at the end of this document.</p>
+
+<h3>Human-approved disturbance adjustment and provenance</h3>
+<p>The Jump Audit examines every approved, ready BA and fight session and
+groups evidence by source video. It never changes an analysis start
+automatically. A video-level recommendation appears in a separate GUI tab and
+becomes the final start only after the researcher selects the video and clicks
+<strong>Approve selected start recommendation</strong>.</p>
+<p>The analysis-ready columns near the front of the combined CSV are
+<code>analysis_start_frame</code> and
+<code>analysis_end_frame_inclusive</code>. They contain the final approved
+decision used in calculations. The original start and decision history are
+retained near the end as <code>archived_original_start_frame</code>,
+<code>start_frame_decision_source</code>, and
+<code>start_frame_decision_provenance</code>. The detailed video and
+animal-track evidence is saved separately in timestamped Jump Audit CSV files,
+so the main statistical table is not overloaded with diagnostic columns.</p>
 
 <h2>Approved-run and repeated-cell selection</h2>
 <p>The GUI reads the pipeline's authoritative
@@ -92,14 +108,49 @@ coordinates, equal x coordinates, or an unexpected animal count produce an
 explicit <code>UNASSIGNED_...</code> value. Non-fight rows contain
 <code>NOT_APPLICABLE_NOT_FIGHT</code>.</p>
 
-<h2>Total distance traveled inside the analysis window</h2>
+<h2>Jump-coordinate QC and total distance</h2>
+<p>For adjacent finite coordinates, the audit calculates the Euclidean step
+length. A jump begins when that length is strictly greater than the GUI
+threshold <em>J</em>, default 50 pixels. A value exactly equal to 50 pixels is
+retained at the default.</p>
+<p>Starting two frames after the jump edge, the processor searches forward for
+at most 120 frames for the first finite coordinate within <em>J</em> pixels of
+the pre-jump coordinate. If it returns, every coordinate beginning with the
+jump destination and ending immediately before the return is excluded. If no
+return is found, every later coordinate in the analysis window is
+conservatively excluded and the row is marked
+<code>PERSISTENT_JUMP_REMAINDER_EXCLUDED_REVIEW_START</code>. This persistent
+status is a prompt to review the analysis start; the processor does not decide
+that the new location is biologically valid.</p>
+<p>Excluded jump-artifact coordinates are represented only as missing values in
+an in-memory working copy. They are excluded from latency, distance,
+wall-buffer, fungus, social, and turtling calculations. Raw IDtracker files are
+never overwritten, coordinates are never interpolated, and jump-excluded
+frames cannot be reclassified as social disappearance.</p>
+<h3>Video-wide disturbance recommendation</h3>
+<p>Jump destination frames are clustered when consecutive destinations are no
+more than four frames apart, equivalent to a ±2-frame synchrony tolerance.
+A cluster is called video-wide only when it affects at least three distinct
+approved session records and at least half of the approved records available
+for that video. Requiring distinct sessions prevents the two animals in one
+fight from creating a camera-wide classification by themselves.</p>
+<p>For a video-wide cluster, let <em>G</em> be the final synchronized
+disturbance frame. The suggested start is the next 50-frame boundary after
+<em>G</em>. Equivalently:</p>
+<p class="formula">suggested start =
+50 × ceil((<em>G</em> + 1) / 50).</p>
+<p>A recommendation is offered only when the suggested start plus the selected
+analysis timespan remains within every included trajectory for that video.
+Cell- or animal-specific jumps remain QC findings and do not produce a
+video-level start recommendation.</p>
+
 <p>For every pair of consecutive global frames, the script calculates the
 straight-line distance between the two centroid positions. The column
 <code>total_distance_px_in_analysis_window</code> is the sum of these step
 distances from the inclusive start through the inclusive end. A step is included
-only when both x and y are finite at both endpoints. Missing gaps are not
-interpolated and the locations on opposite sides of a gap are not joined. The
-warning column reports exactly how many adjacent-frame pairs were excluded.</p>
+only when both endpoints remain finite after missing-data and jump-coordinate
+QC. Missing gaps are not interpolated and locations on opposite sides of a gap
+are not joined. Raw coordinates are never overwritten.</p>
 <p><strong>Why pixel distances contain decimals:</strong> a straight-line move
 across both the horizontal and vertical axes is usually not a whole number of
 pixels. For example, moving one pixel horizontally and one pixel vertically has
@@ -210,6 +261,11 @@ calculations use <strong>p</strong><sup>*</sup>;
 latency, social-event detection, and original missing-data counts continue to
 use <strong>p</strong>. When the switch is off,
 <strong>p</strong><sup>*</sup> = <strong>p</strong> for all frames.</p>
+<p>A coordinate excluded by jump QC is not an original IDtracker missing
+detection and is therefore never eligible for social-disappearance
+substitution. After partner copying, jump QC is applied again to the effective
+calculation series so a copied location cannot introduce a new impossible
+transition.</p>
 <p>The direct remaining unusable-coordinate count is</p>
 <p class="formula">remaining missing frames =
 original missing frames − substituted social-disappearance frames.</p>
@@ -221,8 +277,8 @@ segments that resemble sustained flailing in a small area, but it cannot prove
 that a beetle is upside down. Outputs are therefore named
 <em>turtling candidates</em> and require video or PDF review.</div>
 <p>The detector is applied independently to every animal in both BA and fight
-analyses, using only that animal's original IDtracker coordinates. Optional
-social-disappearance substitutions are never used. Every possible consecutive
+analyses, using that animal's IDtracker coordinates after jump-coordinate QC.
+Optional social-disappearance substitutions are never used. Every possible consecutive
 window of <em>W</em> frames is evaluated; the default is 120 frames.</p>
 <p>A window qualifies only when all of the following are true:</p>
 <ol>
@@ -241,7 +297,7 @@ default 0.25.</li>
 marked as a candidate. Missing frames are not marked. A candidate event is one
 contiguous run of marked frames; events are not merged across gaps.</p>
 <p>For fight analyses only, each marked frame is then tested against the
-secondary ROI, <code>roi_list[1]</code>. If the animal's original centroid is
+secondary ROI, <code>roi_list[1]</code>. If the animal's jump-QC-retained centroid is
 on the boundary or inside that fungus polygon, the frame is removed from the
 turtling candidate mask. It therefore contributes to neither the reported
 candidate-frame count, candidate proportion, contiguous-event count, nor the
@@ -249,7 +305,10 @@ dark-red PDF overlay. BA analyses have no secondary-ROI exclusion.</p>
 <p>The reported turtling proportion for animal <em>i</em> is</p>
 <p class="formula">turtling candidate proportion =
 fungus-excluded candidate frames /
-original valid detected-coordinate frames in the inclusive analysis window.</p>
+valid detected-coordinate frames surviving jump QC in the inclusive analysis
+window.</p>
+<p>Valid frames on the fungus remain in this denominator. They are real
+biological time during which the animal is not counted as turtling.</p>
 <p>If an animal has no valid detected-coordinate frames, the proportion is
 left blank rather than dividing by zero.</p>
 <p>The defaults were provisionally checked against the five supplied PDFs:
@@ -301,10 +360,12 @@ only; CSV classification still uses the exact point-to-segment geometry
 described above. Potential turtling paths are shown as thin, semi-transparent,
 dark-red dashed overlays so the original track remains visible. The metadata
 page is deliberately last.</p>
-<p>The third axis is global frame, not seconds. Lines break at coordinates that
-remain missing in the selected IDtracker file; the prototype does not
-interpolate them. Primary and fungus ROI outlines, exact analysis starts, and
-threshold-crossing positions are displayed where available.</p>
+<p>The third axis is global frame, not seconds. Lines break at original missing
+coordinates and at all jump-artifact coordinates excluded by the rule above;
+the prototype does not interpolate across either. Primary and fungus ROI
+outlines, exact analysis starts, and threshold-crossing positions are displayed
+where available. Subtle gray x marks on the primary 2-D pages identify the raw
+coordinates excluded by jump QC.</p>
 
 <h2>Missing data and failure behavior</h2>
 <ul>
@@ -312,6 +373,10 @@ threshold-crossing positions are displayed where available.</p>
 calculated. A later coordinate is never substituted as the baseline.</li>
 <li>A coordinate that is missing in the selected IDtracker file cannot
 cross the threshold and is skipped without additional interpolation.</li>
+<li>A latency crossing is accepted only while the coordinate remains connected
+to the exact start by a continuous chain of coordinates surviving jump and
+missing-data QC. Once that chain breaks, later raw coordinates cannot create a
+wake latency.</li>
 <li>If no valid point reaches the threshold, status is <code>THRESHOLD_NOT_REACHED</code>;
 this is distinct from a calculation failure.</li>
 <li>If the inclusive analysis end frame exceeds the trajectory array length,
@@ -330,9 +395,9 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <h2>Output columns</h2>
 <table>
 <tr><th>Column</th><th>Meaning</th></tr>
-<tr><td>analysis_start_global_frame</td><td>Researcher-approved global start; deliberately first.</td></tr>
+<tr><td>analysis_start_frame</td><td>Final researcher-approved global start used for calculations; deliberately near the front for statistical work.</td></tr>
 <tr><td>analysis_timespan_frames</td><td>Requested difference between the inclusive end and start; default 7200.</td></tr>
-<tr><td>analysis_end_global_frame_inclusive</td><td>Start plus requested timespan; example 7262.</td></tr>
+<tr><td>analysis_end_frame_inclusive</td><td>Final start plus requested timespan; example 7262.</td></tr>
 <tr><td>analysis_frame_observations_inclusive</td><td>Number of included frame observations, equal to timespan + 1; default 7201.</td></tr>
 <tr><td>movement_threshold_px</td><td>Selected displacement threshold in pixels.</td></tr>
 <tr><td>idtracker_animal_id</td><td>Zero-based IDtracker trajectory-array animal identity.</td></tr>
@@ -340,6 +405,9 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>threshold_crossing_global_frame</td><td>First global frame whose displacement reaches or exceeds the threshold.</td></tr>
 <tr><td>latency_to_threshold_frames</td><td>Crossing frame minus the analysis start frame.</td></tr>
 <tr><td>total_distance_px_in_analysis_window</td><td>Sum of valid consecutive-frame Euclidean steps within S through E only.</td></tr>
+<tr><td>jump_threshold_px</td><td>Adjacent-frame jump threshold; GUI default 50 pixels. A step strictly greater initiates coordinate-level QC.</td></tr>
+<tr><td>jump_artifact_coordinate_frames_excluded</td><td>Animal-specific number of coordinate frames excluded from every calculation by jump QC.</td></tr>
+<tr><td>jump_qc_status</td><td>No-jump, returning-excursion, or persistent-jump interpretation.</td></tr>
 <tr><td>wall_buffer_px</td><td>Inward primary-ROI wall-buffer width.</td></tr>
 <tr><td>frames_inside/outside_wall_buffer</td><td>Valid centroid frames partitioned by the primary-ROI buffer.</td></tr>
 <tr><td>distance_px_inside/outside_wall_buffer</td><td>Valid step distances partitioned using segment midpoints.</td></tr>
@@ -361,7 +429,7 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>remaining_missing_coordinate_frames_after_social_substitution</td><td>Original missing-coordinate frames minus qualifying partner-centroid substitutions; the direct remaining unusable-frame count for distance/location calculations.</td></tr>
 <tr><td>coordinate_frames_used_in_distance_and_location_calculations</td><td>Effective valid-coordinate frame count after any enabled substitutions.</td></tr>
 <tr><td>turtling_candidate_frames</td><td>Valid frames belonging to at least one qualifying tight-loop window after fight-only fungus exclusion; candidate interpretation only.</td></tr>
-<tr><td>turtling_candidate_proportion_of_detected_frames</td><td>Fungus-excluded candidate frames divided by original valid detected-coordinate frames for that animal in the inclusive analysis window.</td></tr>
+<tr><td>turtling_candidate_proportion_of_detected_frames</td><td>Fungus-excluded candidate frames divided by detected-coordinate frames surviving jump QC. Valid time on fungus remains in the denominator as real non-turtling biological time.</td></tr>
 <tr><td>turtling_candidate_events</td><td>Contiguous runs of candidate frames; gaps are not merged.</td></tr>
 <tr><td>turtling_detector_status</td><td>Explicit provisional/calculated or not-calculated status.</td></tr>
 <tr><td>turtling_window_frames</td><td>Sliding candidate-window length; default 120 frames.</td></tr>
@@ -375,6 +443,9 @@ successfully renamed. A failed run cannot replace it with partial data.</p>
 <tr><td>result_status, warning</td><td>Explicit interpretation or reason no result was produced.</td></tr>
 <tr><td>trajectory_source_kind</td><td>Exact selected IDtracker source category, including explicit raw fallback categories.</td></tr>
 <tr><td>session_folder, trajectory_file</td><td>Provenance.</td></tr>
+<tr><td>archived_original_start_frame</td><td>Original interval or manually supplied start before an approved Jump Audit adjustment; placed near the end as archival provenance.</td></tr>
+<tr><td>start_frame_decision_source</td><td>Source interval, manual GUI/CSV entry, or researcher-approved Jump Audit recommendation.</td></tr>
+<tr><td>start_frame_decision_provenance</td><td>Timestamped explanation of an approved change, including previous start, disturbance frame, threshold, audit version, and final start.</td></tr>
 <tr><td>script_version</td><td>Standalone post-processing script version used to generate the row.</td></tr>
 <tr><td>processing_execution_mode</td><td>Combined-CSV provenance: SLURM_ARRAY or DIRECT_SSH.</td></tr>
 </table>
@@ -434,15 +505,36 @@ d<sub>i,f</sub> =
 </p>
 <p style="text-align:center;font-size:1.2em">
 C<sub>i</sub> = min { f ∈ [<em>S</em>, <em>E</em>] :
-d<sub>i,f</sub> ≥ <em>T</em> }
+d<sub>i,f</sub> ≥ <em>T</em> and every step from S through f is valid
+and ≤ <em>J</em> }
 </p>
 <p style="text-align:center;font-size:1.2em">
 L<sub>i</sub> = C<sub>i</sub> − <em>S</em>
 </p>
 <p>Here, <em>C</em> is the first threshold-crossing global frame and
-<em>L</em> is latency in frames. The minimum is undefined when no valid point
-reaches the threshold; that case is reported as
+<em>L</em> is latency in frames and <em>J</em> is the editable one-frame
+anti-jump threshold, default 50 pixels. The minimum is undefined when no
+continuously reachable point reaches the threshold; that case is reported as
 <code>THRESHOLD_NOT_REACHED</code>.</p>
+
+<h3>Jump-coordinate exclusion</h3>
+<p>A raw adjacent coordinate pair initiates jump review when</p>
+<p style="text-align:center;font-size:1.2em">
+q<sub>i,f</sub> =
+√[(x<sub>i,f+1</sub>−x<sub>i,f</sub>)² +
+(y<sub>i,f+1</sub>−y<sub>i,f</sub>)²] &gt; <em>J</em>.
+</p>
+<p>For that jump edge, the return frame is</p>
+<p style="text-align:center;font-size:1.2em">
+R<sub>i,f</sub> = min { r ∈ [f+2, min(f+121,E)] :
+√[(x<sub>i,r</sub>−x<sub>i,f</sub>)² +
+(y<sub>i,r</sub>−y<sub>i,f</sub>)²] ≤ <em>J</em> }.
+</p>
+<p>If <em>R</em> exists, frames <em>f+1</em> through
+<em>R−1</em> are excluded. If the set is empty, frames <em>f+1</em>
+through <em>E</em> are excluded and the event is persistent. These excluded
+frames are not counted as missing IDtracker detections; they are reported
+separately as jump-artifact coordinate exclusions.</p>
 
 <h3>Consecutive-frame step distance and total distance</h3>
 <p style="text-align:center;font-size:1.2em">
@@ -453,7 +545,8 @@ s<sub>i,f</sub> =
 <p style="text-align:center;font-size:1.2em">
 D<sub>i</sub> =
 ∑<sub>f=S</sub><sup>E−1</sup> s<sub>i,f</sub>
-&nbsp;&nbsp;for valid consecutive-frame pairs only
+&nbsp;&nbsp;for consecutive-frame pairs whose two coordinates remain valid
+after missing-data, jump, and optional social-substitution QC
 </p>
 <p>Each square root can produce a non-integer distance even when the coordinate
 differences are integers. For example:</p>
@@ -461,7 +554,9 @@ differences are integers. For example:</p>
 √(1² + 1²) = √2 ≈ 1.414213562 pixels
 </p>
 <p>Therefore, total distance is correctly stored as a decimal number. The
-unrounded step distances are summed; no per-step rounding is performed.</p>
+unrounded accepted step distances are summed; no per-step rounding is
+performed. At the default <em>J</em>=50 pixels, a 50-pixel step is retained and
+a step greater than 50 pixels is excluded.</p>
 
 <h3>Wall-buffer distance partition</h3>
 <p>The midpoint used to classify a valid movement segment is</p>

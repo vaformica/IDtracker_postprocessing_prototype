@@ -33,6 +33,7 @@ SCRIPT_VERSION = (BASE / "VERSION").read_text(encoding="utf-8").strip()
 SLURM_WORKER = BASE / "slurm_worker.py"
 SLURM_FINALIZER = BASE / "slurm_finalize.py"
 COMBINE_SCRIPT = BASE / "combine_results.py"
+JUMP_AUDIT_SCRIPT = (BASE / "jump_audit.py").read_text(encoding="utf-8")
 TRAJECTORY_NAMES = {
     "validated.npy": 0,
     "without_gaps.npy": 1,
@@ -265,7 +266,12 @@ KNOWN MANUAL START REVIEW — entry required
 The video is on the collaborator-provided review list, so manual entry is required.
 
 START MANUALLY APPROVED
-A positive global start was entered directly or imported from the editable CSV."""
+A positive global start was entered directly or imported from the editable CSV.
+
+START APPROVED FROM JUMP AUDIT
+The researcher clicked approval for a video-wide synchronized-disturbance
+recommendation. The original start and audit evidence are retained in output
+provenance columns."""
 
 
 def make_missing_start_report(records):
@@ -489,12 +495,17 @@ class App(tk.Tk):
         )
         self.scan_running = False
         self.processing_running = False
+        self.jump_audit_running = False
         self.last_combined_remote = ""
         self.last_plot_remote = ""
         self.current_batch_token = ""
         self.auto_download_started_for = ""
         self.all_records = []
         self.filtered_records = []
+        self.jump_audit_summaries = []
+        self.jump_audit_tracks = []
+        self.jump_audit_rows = {}
+        self.jump_audit_timestamp = ""
         self.sort_column = "video_name"
         self.sort_reverse = False
 
@@ -502,9 +513,11 @@ class App(tk.Tk):
         self.notebook.pack(fill="both", expand=True, padx=10, pady=8)
         self.setup_tab = ttk.Frame(self.notebook)
         self.sessions_tab = ttk.Frame(self.notebook)
+        self.jump_audit_tab = ttk.Frame(self.notebook)
         self.logs_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.setup_tab, text="Setup & Run")
         self.notebook.add(self.sessions_tab, text="Sessions")
+        self.notebook.add(self.jump_audit_tab, text="Jump Audit")
         self.notebook.add(self.logs_tab, text="Logs & Diagnostics")
 
         connection = ttk.LabelFrame(
@@ -538,6 +551,7 @@ class App(tk.Tk):
         self.wall_buffer = tk.StringVar(value="30")
         self.fungus_buffer = tk.StringVar(value="30")
         self.social_distance = tk.StringVar(value="60")
+        self.one_frame_jump = tk.StringVar(value="50")
         self.use_social_disappearance = tk.BooleanVar(value=True)
         parameter_fields = [
             (
@@ -556,6 +570,10 @@ class App(tk.Tk):
             (
                 2, 0, "Fight social distance (pixels)",
                 self.social_distance, 10,
+            ),
+            (
+                3, 0, "Coordinate-jump threshold (pixels)",
+                self.one_frame_jump, 10,
             ),
         ]
         for row, column, label, variable, width in parameter_fields:
@@ -581,14 +599,14 @@ class App(tk.Tk):
                 "partner locations actually copied for that animal."
             ),
         ).grid(
-            row=3, column=0, columnspan=5, sticky="w", padx=8, pady=(2, 6)
+            row=4, column=0, columnspan=5, sticky="w", padx=8, pady=(2, 6)
         )
         controls.columnconfigure(4, weight=1)
         ttk.Button(
             controls,
             text="Edit selected start frame",
             command=self.edit_start,
-        ).grid(row=4, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 8))
+        ).grid(row=5, column=0, columnspan=2, sticky="w", padx=8, pady=(2, 8))
         turtling_controls = ttk.LabelFrame(
             self.setup_tab,
             text="3. Provisional tight-loop turtling candidate detector",
@@ -733,6 +751,7 @@ class App(tk.Tk):
                 "Needs new start",
                 "Ready to process",
                 "Manually approved start",
+                "Jump-audit approved start",
                 "No usable trajectory",
             ],
             state="readonly",
@@ -824,6 +843,14 @@ class App(tk.Tk):
             text="Uncheck all sessions",
             command=self.uncheck_all_sessions,
         ).grid(row=2, column=1, sticky="w", padx=4, pady=(4, 2))
+        self.jump_audit_button = ttk.Button(
+            start_file_bar,
+            text="Audit jumps in all ready BA + fights",
+            command=self.run_jump_audit,
+        )
+        self.jump_audit_button.grid(
+            row=2, column=2, sticky="w", padx=(18, 4), pady=(4, 2)
+        )
         start_file_bar.columnconfigure(3, weight=1)
 
         columns = (
@@ -891,6 +918,110 @@ class App(tk.Tk):
             wraplength=1350,
         ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=5)
 
+        audit_controls = ttk.Frame(self.jump_audit_tab)
+        audit_controls.pack(fill="x", padx=6, pady=6)
+        ttk.Button(
+            audit_controls,
+            text="Run audit on all approved ready BA + fights",
+            command=self.run_jump_audit,
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            audit_controls,
+            text="Approve selected start recommendation",
+            command=self.approve_jump_recommendation,
+        ).pack(side="left", padx=4)
+        ttk.Button(
+            audit_controls,
+            text="Export audit and decisions",
+            command=self.export_jump_audit,
+        ).pack(side="left", padx=4)
+        self.jump_audit_status = tk.StringVar(
+            value=(
+                "Run the read-only audit after scanning. No start changes are "
+                "made until you approve a video recommendation."
+            )
+        )
+        ttk.Label(
+            self.jump_audit_tab,
+            textvariable=self.jump_audit_status,
+            anchor="w",
+            justify="left",
+            wraplength=1320,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        audit_table_frame = ttk.Frame(self.jump_audit_tab)
+        audit_table_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        audit_columns = (
+            "decision",
+            "audit_status",
+            "video",
+            "analysis_type",
+            "current_starts",
+            "suggested_start_global_frame",
+            "last_synchronized_disturbance_frame",
+            "approved_records",
+            "tracks_with_jumps",
+            "persistent_jump_tracks",
+            "synchronized_disturbance_clusters",
+        )
+        self.jump_audit_table = ttk.Treeview(
+            audit_table_frame,
+            columns=audit_columns,
+            show="headings",
+            selectmode="extended",
+        )
+        audit_labels = {
+            "decision": "Decision",
+            "audit_status": "Audit result",
+            "video": "Video",
+            "analysis_type": "Type",
+            "current_starts": "Current start(s)",
+            "suggested_start_global_frame": "Suggested start",
+            "last_synchronized_disturbance_frame": "Last disturbance",
+            "approved_records": "Approved sessions",
+            "tracks_with_jumps": "Tracks with jumps",
+            "persistent_jump_tracks": "Persistent tracks",
+            "synchronized_disturbance_clusters": "Video-wide events",
+        }
+        audit_widths = {
+            "decision": 105,
+            "audit_status": 310,
+            "video": 390,
+            "analysis_type": 75,
+            "current_starts": 115,
+            "suggested_start_global_frame": 115,
+            "last_synchronized_disturbance_frame": 115,
+            "approved_records": 105,
+            "tracks_with_jumps": 105,
+            "persistent_jump_tracks": 105,
+            "synchronized_disturbance_clusters": 105,
+        }
+        for column in audit_columns:
+            self.jump_audit_table.heading(
+                column, text=audit_labels[column]
+            )
+            self.jump_audit_table.column(
+                column, width=audit_widths[column], anchor="w"
+            )
+        audit_y = ttk.Scrollbar(
+            audit_table_frame,
+            orient="vertical",
+            command=self.jump_audit_table.yview,
+        )
+        audit_x = ttk.Scrollbar(
+            audit_table_frame,
+            orient="horizontal",
+            command=self.jump_audit_table.xview,
+        )
+        self.jump_audit_table.configure(
+            yscrollcommand=audit_y.set,
+            xscrollcommand=audit_x.set,
+        )
+        self.jump_audit_table.grid(row=0, column=0, sticky="nsew")
+        audit_y.grid(row=0, column=1, sticky="ns")
+        audit_x.grid(row=1, column=0, sticky="ew")
+        audit_table_frame.rowconfigure(0, weight=1)
+        audit_table_frame.columnconfigure(0, weight=1)
+
         diagnostic_buttons = ttk.Frame(logs_tab)
         diagnostic_buttons.pack(fill="x", padx=6, pady=6)
         ttk.Button(
@@ -956,6 +1087,8 @@ class App(tk.Tk):
                     self.status.set(payload)
                 elif kind == "scan":
                     self.load_scan(payload)
+                elif kind == "jump_audit_result":
+                    self.load_jump_audit(payload)
                 elif kind == "log":
                     self._append_log(payload)
                 elif kind == "show_logs":
@@ -963,6 +1096,9 @@ class App(tk.Tk):
                 elif kind == "scan_done":
                     self.scan_running = False
                     self.scan_button.configure(state="normal")
+                elif kind == "jump_audit_done":
+                    self.jump_audit_running = False
+                    self.jump_audit_button.configure(state="normal")
                 elif kind == "processing_done":
                     self.processing_running = False
                     self.process_button.configure(state="normal")
@@ -1299,6 +1435,13 @@ class App(tk.Tk):
                 records.append(
                     {"session": session, "trajectory": trajectory, "detected": detected,
                      "source": source, "start": approved, "status": status, "use": "No",
+                     "archived_original_start": approved,
+                     "start_decision_source": (
+                         "SOURCE_INTERVAL" if approved else ""
+                     ),
+                     "start_decision_provenance": (
+                         f"Detected from {source}" if approved else ""
+                     ),
                      "trajectory_status": trajectory_status,
                      "trajectory_diagnostic": trajectory_diagnostic,
                      "raw_trajectory_candidates": raw_trajectory_candidates,
@@ -1529,8 +1672,16 @@ class App(tk.Tk):
             )
             return
         for record, value in updates:
+            if not str(record.get("archived_original_start", "")).strip():
+                record["archived_original_start"] = record.get(
+                    "start", ""
+                )
             record["start"] = str(value)
             record["status"] = "START MANUALLY APPROVED"
+            record["start_decision_source"] = "MANUAL_CSV_IMPORT"
+            record["start_decision_provenance"] = (
+                f"Manually imported from {source.name}"
+            )
         self.apply_filters()
         self.log(
             f"Imported {len(updates)} manually approved global starts from {source}"
@@ -1538,6 +1689,290 @@ class App(tk.Tk):
         messagebox.showinfo(
             "Start times imported",
             f"Applied {len(updates)} positive global start values atomically.",
+        )
+
+    def run_jump_audit(self):
+        if self.jump_audit_running:
+            self.notebook.select(self.jump_audit_tab)
+            self.status.set("The jump audit is already running.")
+            return
+        try:
+            window = int(self.window_frames.get())
+            jump_threshold = float(self.one_frame_jump.get())
+            if window <= 0 or jump_threshold <= 0:
+                raise ValueError
+        except (TypeError, ValueError):
+            messagebox.showerror(
+                "Invalid jump-audit settings",
+                "The analysis span and jump threshold must be positive.",
+            )
+            return
+        ready = []
+        for record in self.all_records:
+            try:
+                positive_start = int(record.get("start", "")) > 0
+            except (TypeError, ValueError):
+                positive_start = False
+            analysis = str(record.get("analysis") or "").lower()
+            if (
+                record.get("processable")
+                and positive_start
+                and analysis in {"ba", "fight"}
+            ):
+                ready.append(record)
+        if not ready:
+            messagebox.showwarning(
+                "No ready BA or fight sessions",
+                "Scan approved runs first and enter all required start frames.",
+            )
+            return
+
+        manifest = {
+            "jump_threshold_px": jump_threshold,
+            "window_frames": window,
+            "records": [
+                {
+                    "video": record["video"],
+                    "analysis": record["analysis"],
+                    "cell_label": record["cell_label"],
+                    "qc_record_id": record["qc_record_id"],
+                    "trajectory": record["trajectory"],
+                    "start": int(record["start"]),
+                }
+                for record in ready
+            ],
+        }
+
+        def action():
+            self.log(
+                f"Jump audit started for all {len(ready)} approved ready BA "
+                f"and fight session(s); threshold={jump_threshold:g} px; "
+                f"inclusive span={window}."
+            )
+            self.work.put(("show_logs", None))
+            remote_home = self.ssh().run('printf "%s" "$HOME"').strip()
+            remote_python = expand_remote_path(
+                self.remote_python.get(), remote_home
+            )
+            output = self.ssh().run(
+                f"{shlex.quote(remote_python)} -c "
+                + shlex.quote(JUMP_AUDIT_SCRIPT),
+                input_text=json.dumps(manifest),
+                timeout=3600,
+            )
+            result = json.loads(output)
+            result["audited_session_count"] = len(ready)
+            result["created_at"] = datetime.now().astimezone().isoformat(
+                timespec="seconds"
+            )
+            self.work.put(("jump_audit_result", result))
+            self.log(
+                f"Jump audit completed: {len(result['summaries'])} video(s), "
+                f"{len(result['tracks'])} IDtracker animal track(s)."
+            )
+
+        self.jump_audit_running = True
+        self.jump_audit_button.configure(state="disabled")
+        self.status.set(
+            f"Auditing {len(ready)} approved ready BA and fight sessions..."
+        )
+
+        def guarded():
+            try:
+                action()
+            finally:
+                self.work.put(("jump_audit_done", None))
+
+        self._background(guarded)
+
+    def _render_jump_audit(self):
+        for item in self.jump_audit_table.get_children():
+            self.jump_audit_table.delete(item)
+        self.jump_audit_rows.clear()
+        columns = self.jump_audit_table["columns"]
+        for summary in self.jump_audit_summaries:
+            item = self.jump_audit_table.insert(
+                "",
+                "end",
+                values=tuple(summary.get(column, "") for column in columns),
+            )
+            self.jump_audit_rows[item] = summary
+
+    def load_jump_audit(self, result):
+        self.jump_audit_summaries = list(result.get("summaries") or [])
+        self.jump_audit_tracks = list(result.get("tracks") or [])
+        self.jump_audit_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        for summary in self.jump_audit_summaries:
+            summary["decision"] = (
+                "PENDING REVIEW"
+                if summary.get("suggested_start_global_frame") != ""
+                else "NO START CHANGE"
+            )
+        self._render_jump_audit()
+        recommended = sum(
+            bool(summary.get("suggested_start_global_frame"))
+            for summary in self.jump_audit_summaries
+        )
+        path_text = self._write_jump_audit_files()
+        self.jump_audit_status.set(
+            f"Audited {result.get('audited_session_count', 0)} approved ready "
+            f"BA/fight sessions across {len(self.jump_audit_summaries)} videos. "
+            f"{recommended} video(s) have a reviewable start recommendation. "
+            "No starts have been changed."
+        )
+        self.status.set(
+            f"Jump audit complete: {recommended} video-level start "
+            "recommendation(s); approval is required."
+        )
+        self.notebook.select(self.jump_audit_tab)
+        messagebox.showinfo(
+            "Jump audit complete",
+            f"Found {recommended} video-level start recommendation(s).\n\n"
+            "No start was changed. Select a recommendation and click Approve.\n\n"
+            f"Timestamped audit CSV files:\n{path_text}",
+        )
+
+    @staticmethod
+    def _csv_safe_audit_row(row):
+        output = {}
+        for key, value in row.items():
+            if isinstance(value, (dict, list)):
+                output[key] = json.dumps(value, sort_keys=True)
+            else:
+                output[key] = value
+        return output
+
+    def _jump_audit_folder(self):
+        downloads = Path.home() / "Downloads"
+        base = downloads if downloads.is_dir() else Path.home()
+        return (
+            base
+            / "IDtracker_postprocessing_results"
+            / "jump_audits"
+        )
+
+    def _write_jump_audit_files(self, folder=None):
+        if not self.jump_audit_summaries:
+            return ""
+        destination = Path(folder) if folder else self._jump_audit_folder()
+        destination.mkdir(parents=True, exist_ok=True)
+        stamp = self.jump_audit_timestamp or datetime.now().strftime(
+            "%Y%m%d_%H%M%S"
+        )
+        paths = []
+        for label, rows in (
+            ("videos", self.jump_audit_summaries),
+            ("tracks", self.jump_audit_tracks),
+        ):
+            if not rows:
+                continue
+            path = destination / f"jump_audit_{stamp}_{label}.csv"
+            safe_rows = [self._csv_safe_audit_row(row) for row in rows]
+            fields = list(safe_rows[0])
+            with path.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(
+                    stream, fieldnames=fields, extrasaction="ignore"
+                )
+                writer.writeheader()
+                writer.writerows(safe_rows)
+            paths.append(str(path))
+        return "\n".join(paths)
+
+    def export_jump_audit(self):
+        if not self.jump_audit_summaries:
+            messagebox.showinfo(
+                "No jump audit",
+                "Run the jump audit before exporting.",
+            )
+            return
+        destination = filedialog.askdirectory(
+            title="Choose folder for jump-audit CSV files",
+            initialdir=str(self._jump_audit_folder()),
+            mustexist=False,
+        )
+        if not destination:
+            return
+        paths = self._write_jump_audit_files(destination)
+        messagebox.showinfo(
+            "Jump audit exported",
+            f"Saved the video summary and detailed track audit:\n\n{paths}",
+        )
+
+    def approve_jump_recommendation(self):
+        selected = self.jump_audit_table.selection()
+        if not selected:
+            messagebox.showinfo(
+                "Select a recommendation",
+                "Select one or more video rows in the Jump Audit table.",
+            )
+            return
+        summaries = [self.jump_audit_rows[item] for item in selected]
+        invalid = [
+            summary["video"]
+            for summary in summaries
+            if summary.get("suggested_start_global_frame") == ""
+            or summary.get("suggested_full_window_fits") is not True
+        ]
+        if invalid:
+            messagebox.showerror(
+                "Recommendation cannot be approved",
+                "These selected videos do not have a complete-window start "
+                "recommendation:\n\n" + "\n".join(invalid),
+            )
+            return
+        details = "\n".join(
+            f"{summary['video']}: {summary['current_starts']} -> "
+            f"{summary['suggested_start_global_frame']}"
+            for summary in summaries
+        )
+        if not messagebox.askyesno(
+            "Approve disturbance-adjusted starts",
+            "Apply these recommendations to every approved session belonging "
+            "to each video?\n\n"
+            + details
+            + "\n\nThe original starts and audit evidence will remain in "
+            "the processed CSV provenance columns.",
+        ):
+            return
+        approved_at = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+        changed = 0
+        for summary in summaries:
+            video = summary["video"]
+            new_start = int(summary["suggested_start_global_frame"])
+            for record in self.all_records:
+                if record.get("video") != video:
+                    continue
+                old_start = str(record.get("start", ""))
+                if not str(record.get("archived_original_start", "")).strip():
+                    record["archived_original_start"] = old_start
+                record["start"] = str(new_start)
+                record["status"] = "START APPROVED FROM JUMP AUDIT"
+                record["start_decision_source"] = "JUMP_AUDIT_APPROVED"
+                record["start_decision_provenance"] = (
+                    f"Approved {approved_at}; audit v"
+                    f"{summary['audit_version']}; previous start {old_start}; "
+                    f"last synchronized disturbance frame "
+                    f"{summary['last_synchronized_disturbance_frame']}; "
+                    f"jump threshold {summary['jump_threshold_px']} px; "
+                    f"approved replacement start {new_start}"
+                )
+                changed += 1
+            summary["decision"] = "APPROVED"
+        self._render_jump_audit()
+        self.apply_filters()
+        self._write_jump_audit_files()
+        self.log(
+            f"Approved {len(summaries)} video-level jump-audit start "
+            f"recommendation(s), updating {changed} approved session row(s)."
+        )
+        messagebox.showinfo(
+            "Start recommendations approved",
+            f"Updated {changed} approved session row(s).\n\n"
+            "The final start will appear near the front of the results CSV; "
+            "the archived original and decision provenance will appear near "
+            "the end.",
         )
 
     def apply_filters(self):
@@ -1562,6 +1997,12 @@ class App(tk.Tk):
             if (
                 start_mode == "Manually approved start"
                 and record.get("status") != "START MANUALLY APPROVED"
+            ):
+                continue
+            if (
+                start_mode == "Jump-audit approved start"
+                and record.get("status")
+                != "START APPROVED FROM JUMP AUDIT"
             ):
                 continue
             if (
@@ -1643,6 +2084,13 @@ class App(tk.Tk):
         self.details.set(
             f"Detected start: {record.get('detected') or 'none'} | "
             f"Interval evidence: {record.get('source') or 'none'}\n"
+            f"Final start decision: {record.get('start') or 'none'} | "
+            f"Decision source: "
+            f"{record.get('start_decision_source') or 'none'}\n"
+            f"Archived original start: "
+            f"{record.get('archived_original_start') or 'none'} | "
+            f"Decision provenance: "
+            f"{record.get('start_decision_provenance') or 'none'}\n"
             f"Canonical session: {record.get('session')}\n"
             f"IDtracker trajectory status: {record.get('trajectory_status')}\n"
             f"Selected trajectory: "
@@ -1708,8 +2156,14 @@ class App(tk.Tk):
             return
         selected_records = [self.rows[item] for item in selected]
         for record in selected_records:
+            if not str(record.get("archived_original_start", "")).strip():
+                record["archived_original_start"] = record.get("start", "")
             record["start"] = str(value)
             record["status"] = "START MANUALLY APPROVED"
+            record["start_decision_source"] = "MANUAL_GUI_ENTRY"
+            record["start_decision_provenance"] = (
+                "Manually entered in the Sessions tab"
+            )
         self.apply_filters()
 
     def _refresh(self, item):
@@ -2026,6 +2480,8 @@ class App(tk.Tk):
                 "--fungus-buffer-px", str(parameters["fungus_buffer"]),
                 "--social-distance-threshold-px",
                 str(parameters["social_distance"]),
+                "--one-frame-jump-threshold-px",
+                str(parameters["one_frame_jump"]),
                 "--turtling-window-frames",
                 str(parameters["turtling_window"]),
                 "--turtling-min-path-px",
@@ -2039,6 +2495,15 @@ class App(tk.Tk):
                 "--turtling-max-step-px",
                 str(parameters["turtling_max_step"]),
                 "--analysis-type", record["analysis"],
+                "--analysis-start-original-global-frame",
+                str(
+                    record.get("archived_original_start")
+                    or record["start"]
+                ),
+                "--analysis-start-source",
+                record.get("start_decision_source") or "SOURCE_INTERVAL",
+                "--analysis-start-adjustment-provenance",
+                record.get("start_decision_provenance") or "",
                 "--video", record["video"],
                 "--cell-label", record["cell_label"],
                 "--qc-record-id", record["qc_record_id"],
@@ -2320,6 +2785,7 @@ class App(tk.Tk):
             wall_buffer = float(self.wall_buffer.get())
             fungus_buffer = float(self.fungus_buffer.get())
             social_distance = float(self.social_distance.get())
+            one_frame_jump = float(self.one_frame_jump.get())
             use_social_disappearance = bool(
                 self.use_social_disappearance.get()
             )
@@ -2345,6 +2811,7 @@ class App(tk.Tk):
                 or wall_buffer < 0
                 or fungus_buffer < 0
                 or social_distance <= 0
+                or one_frame_jump <= 0
                 or turtling_window < 3
                 or turtling_min_path <= 0
                 or turtling_max_radius90 < 5
@@ -2364,7 +2831,8 @@ class App(tk.Tk):
                 "Invalid review values",
                 "Every checked row needs a positive approved start, window, wake "
                 "threshold. ROI buffer widths cannot be negative. Social "
-                "distance threshold must be positive. Turtling settings require "
+                "distance and one-frame jump thresholds must be positive. "
+                "Turtling settings require "
                 "a window of at least 3 frames, radius90 of at least 5 pixels, "
                 "positive path/turn/step thresholds, and net/path from 0 to 1.",
             )
@@ -2391,6 +2859,7 @@ class App(tk.Tk):
             f"Wall buffer: {wall_buffer:g} pixels\n"
             f"Fungus inward buffer for fights: {fungus_buffer:g} pixels\n"
             f"Fight social distance: {social_distance:g} pixels\n"
+            f"Coordinate-jump threshold: {one_frame_jump:g} pixels\n"
             f"Use social disappearance in distance/location calculations: "
             f"{'YES' if use_social_disappearance else 'NO'}\n"
             f"Turtling candidate rule: {turtling_window} frames, "
@@ -2404,7 +2873,7 @@ class App(tk.Tk):
             "The best available IDtracker trajectory is used: validated and "
             "without-gaps files are preferred, with raw trajectories used as "
             "fallbacks. This prototype does not add interpolation; missing "
-            "coordinates and excluded distance steps are reported. Previous complete "
+            "coordinates and jump-QC exclusions are reported. Previous complete "
             "results and PDF plots for these sessions will be atomically replaced."
         )
         if not messagebox.askyesno(
@@ -2426,6 +2895,7 @@ class App(tk.Tk):
             "wall_buffer": wall_buffer,
             "fungus_buffer": fungus_buffer,
             "social_distance": social_distance,
+            "one_frame_jump": one_frame_jump,
             "use_social_disappearance": use_social_disappearance,
             "turtling_window": turtling_window,
             "turtling_min_path": turtling_min_path,
@@ -2452,6 +2922,7 @@ class App(tk.Tk):
                 f"wall buffer={wall_buffer:g} px, "
                 f"fungus buffer={fungus_buffer:g} px, "
                 f"social distance={social_distance:g} px, "
+                f"coordinate-jump threshold={one_frame_jump:g} px, "
                 f"social disappearance calculation switch="
                 f"{'ON' if use_social_disappearance else 'OFF'}, "
                 f"turtling window={turtling_window} frames, "
@@ -2524,6 +2995,8 @@ class App(tk.Tk):
                         "--fungus-buffer-px", str(fungus_buffer),
                         "--social-distance-threshold-px",
                         str(social_distance),
+                        "--one-frame-jump-threshold-px",
+                        str(one_frame_jump),
                         "--turtling-window-frames", str(turtling_window),
                         "--turtling-min-path-px", str(turtling_min_path),
                         "--turtling-max-radius90-px",
@@ -2535,6 +3008,22 @@ class App(tk.Tk):
                         "--turtling-max-step-px",
                         str(turtling_max_step),
                         "--analysis-type", shlex.quote(record["analysis"]),
+                        "--analysis-start-original-global-frame",
+                        shlex.quote(
+                            str(
+                                record.get("archived_original_start")
+                                or record["start"]
+                            )
+                        ),
+                        "--analysis-start-source",
+                        shlex.quote(
+                            record.get("start_decision_source")
+                            or "SOURCE_INTERVAL"
+                        ),
+                        "--analysis-start-adjustment-provenance",
+                        shlex.quote(
+                            record.get("start_decision_provenance") or ""
+                        ),
                         "--video", shlex.quote(record["video"]),
                         "--cell-label", shlex.quote(record["cell_label"]),
                         "--qc-record-id", shlex.quote(record["qc_record_id"]),

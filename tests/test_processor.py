@@ -13,12 +13,15 @@ from processor import (
     IDTRACKER_TRAJECTORY_SOURCES,
     SCRIPT_VERSION,
     analyze,
+    continuous_path_segments,
     compute_social_candidates,
     compute_turtling_candidates,
+    filter_jump_artifact_coordinates,
     main,
     validate_trajectory_source,
     write_plot_pdf,
 )
+from jump_audit import audit_manifest
 from firebird_gui import (
     BATCH_SESSION_RESOLVER,
     COMBINE_RESULTS,
@@ -160,7 +163,7 @@ class ProcessorTests(unittest.TestCase):
             arr[62:, 0, 0] = np.arange(8000 - 62)
             np.save(path, arr)
             row = analyze(path, Path(folder), 62, 7200, 30)[0]
-            self.assertEqual(row["analysis_end_global_frame_inclusive"], 7262)
+            self.assertEqual(row["analysis_end_frame_inclusive"], 7262)
             self.assertEqual(row["analysis_timespan_frames"], 7200)
             self.assertEqual(
                 row["analysis_frame_observations_inclusive"], 7201
@@ -212,6 +215,178 @@ class ProcessorTests(unittest.TestCase):
             )
             self.assertEqual(
                 row["trajectory_source_kind"], "IDTRACKER_WITHOUT_GAPS"
+            )
+
+    def test_one_frame_jump_over_50_is_excluded_and_breaks_latency_chain(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((30, 1, 2), dtype=float)
+            arr[10:16, 0, 0] = [0, 10, 20, 200, 210, 220]
+            np.save(trajectory, arr)
+            row = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=5,
+                threshold=30,
+                one_frame_jump_threshold_px=50,
+            )[0]
+            self.assertEqual(
+                row["total_distance_px_in_analysis_window"],
+                20.0,
+            )
+            self.assertEqual(row["jump_threshold_px"], 50)
+            self.assertEqual(
+                row["jump_artifact_coordinate_frames_excluded"], 3
+            )
+            self.assertEqual(
+                row["jump_qc_status"],
+                "PERSISTENT_JUMP_REMAINDER_EXCLUDED_REVIEW_START",
+            )
+            self.assertEqual(row["threshold_crossing_global_frame"], "")
+            self.assertEqual(row["latency_to_threshold_frames"], "")
+            self.assertEqual(row["result_status"], "THRESHOLD_NOT_REACHED")
+            self.assertIn("ANTI_JUMP_COORDINATE_QC", row["warning"])
+            segments = continuous_path_segments(
+                arr[10:16, 0, :], maximum_step_px=50
+            )
+            self.assertEqual(
+                [offsets.tolist() for offsets, _xy in segments],
+                [[0, 1, 2], [3, 4, 5]],
+            )
+
+    def test_one_frame_step_equal_to_50_is_retained(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((30, 1, 2), dtype=float)
+            arr[10:13, 0, 0] = [0, 50, 100]
+            np.save(trajectory, arr)
+            row = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=2,
+                threshold=30,
+                one_frame_jump_threshold_px=50,
+            )[0]
+            self.assertEqual(
+                row["total_distance_px_in_analysis_window"],
+                100.0,
+            )
+            self.assertEqual(
+                row["jump_artifact_coordinate_frames_excluded"], 0
+            )
+            self.assertEqual(row["threshold_crossing_global_frame"], 11)
+
+    def test_returning_jump_excludes_coordinates_not_only_step(self):
+        xy = np.asarray(
+            [[0, 0], [10, 0], [200, 0], [201, 0], [11, 0], [12, 0]],
+            dtype=float,
+        )
+        result = filter_jump_artifact_coordinates(
+            xy, threshold_px=50, return_horizon_frames=120
+        )
+        self.assertEqual(
+            np.flatnonzero(result["excluded_mask"]).tolist(),
+            [2, 3],
+        )
+        self.assertTrue(np.isnan(result["cleaned_xy"][2:4]).all())
+        self.assertEqual(
+            result["status"],
+            "RETURNING_JUMP_ARTIFACT_COORDINATES_EXCLUDED",
+        )
+        self.assertEqual(result["persistent_events"], 0)
+
+    def test_jump_exclusion_is_not_social_disappearance_evidence(self):
+        window = np.zeros((8, 2, 2), dtype=float)
+        window[:, 1, 0] = 10
+        window[3:5, 0, 0] = 200
+        filtered = filter_jump_artifact_coordinates(
+            window[:, 0, :], threshold_px=50
+        )
+        cleaned = window.copy()
+        cleaned[:, 0, :] = filtered["cleaned_xy"]
+        social = compute_social_candidates(
+            cleaned,
+            social_distance_threshold_px=60,
+            eligible_missing_mask=~np.isfinite(window).all(axis=2),
+        )
+        self.assertEqual(
+            int(social["disappearance_masks_by_animal"].sum()), 0
+        )
+
+    def test_video_wide_jump_audit_recommends_reviewable_start(self):
+        with tempfile.TemporaryDirectory() as folder:
+            records = []
+            for index in range(4):
+                path = Path(folder) / f"trajectory_{index}.npy"
+                arr = np.zeros((9000, 1, 2), dtype=float)
+                arr[:, 0, 0] = np.arange(9000) * 0.1
+                if index < 3:
+                    arr[1020:1022, 0, 1] = 200
+                np.save(path, arr)
+                records.append(
+                    {
+                        "video": "Camera_2_example.mp4",
+                        "analysis": "ba",
+                        "cell_label": f"A{index + 1}",
+                        "qc_record_id": f"QC{index + 1}",
+                        "trajectory": str(path),
+                        "start": 760,
+                    }
+                )
+            result = audit_manifest(
+                {
+                    "jump_threshold_px": 50,
+                    "window_frames": 7200,
+                    "records": records,
+                }
+            )
+            summary = result["summaries"][0]
+            self.assertEqual(
+                summary["audit_status"],
+                "VIDEO_WIDE_DISTURBANCE_START_RECOMMENDED",
+            )
+            self.assertEqual(
+                summary["suggested_start_global_frame"], 1050
+            )
+            self.assertIs(summary["suggested_full_window_fits"], True)
+
+    def test_cell_specific_jump_audit_does_not_suggest_video_start(self):
+        with tempfile.TemporaryDirectory() as folder:
+            records = []
+            for index in range(4):
+                path = Path(folder) / f"trajectory_{index}.npy"
+                arr = np.zeros((9000, 1, 2), dtype=float)
+                arr[:, 0, 0] = np.arange(9000) * 0.1
+                if index == 0:
+                    arr[1507, 0, 1] = 200
+                np.save(path, arr)
+                records.append(
+                    {
+                        "video": "Camera_2_example.mp4",
+                        "analysis": "ba",
+                        "cell_label": f"A{index + 1}",
+                        "qc_record_id": f"QC{index + 1}",
+                        "trajectory": str(path),
+                        "start": 946,
+                    }
+                )
+            summary = audit_manifest(
+                {
+                    "jump_threshold_px": 50,
+                    "window_frames": 7200,
+                    "records": records,
+                }
+            )["summaries"][0]
+            self.assertEqual(
+                summary["audit_status"],
+                "CELL_OR_ANIMAL_SPECIFIC_RETURNING_JUMPS",
+            )
+            self.assertEqual(
+                summary["suggested_start_global_frame"], ""
             )
 
     def test_wall_buffer_partitions_frames_and_distance(self):
@@ -513,6 +688,7 @@ class ProcessorTests(unittest.TestCase):
                 page.extract_text() or "" for page in reader.pages
             )
             self.assertIn(f"Script: v{SCRIPT_VERSION}", all_text)
+            self.assertIn("One-frame anti-jump threshold", all_text)
             self.assertIn("Social-distance and disappearance", all_text)
             self.assertIn("Translucent ROI-buffer audit map", all_text)
 
@@ -629,6 +805,33 @@ class ProcessorTests(unittest.TestCase):
             row = analyze(trajectory, root, 10, 5, 30)[0]
             self.assertEqual(row["script_version"], SCRIPT_VERSION)
 
+    def test_final_start_is_simple_and_original_start_is_archived(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            np.save(trajectory, np.zeros((100, 1, 2), dtype=float))
+            row = analyze(
+                trajectory,
+                root,
+                start=20,
+                window=5,
+                threshold=30,
+                analysis_start_original_global_frame=10,
+                analysis_start_source="JUMP_AUDIT_APPROVED",
+                analysis_start_adjustment_provenance="reviewed example",
+            )[0]
+            self.assertEqual(row["analysis_start_frame"], 20)
+            self.assertEqual(row["analysis_end_frame_inclusive"], 25)
+            self.assertEqual(row["archived_original_start_frame"], 10)
+            self.assertEqual(
+                row["start_frame_decision_source"],
+                "JUMP_AUDIT_APPROVED",
+            )
+            self.assertEqual(
+                row["start_frame_decision_provenance"],
+                "reviewed example",
+            )
+
     def test_combined_csv_preserves_rows_and_provenance(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -638,12 +841,12 @@ class ProcessorTests(unittest.TestCase):
                 with source.open("w", newline="", encoding="utf-8") as stream:
                     writer = csv.DictWriter(
                         stream,
-                        fieldnames=["analysis_start_global_frame", "idtracker_animal_id"],
+                        fieldnames=["analysis_start_frame", "idtracker_animal_id"],
                     )
                     writer.writeheader()
                     writer.writerow(
                         {
-                            "analysis_start_global_frame": 10 * number,
+                            "analysis_start_frame": 10 * number,
                             "idtracker_animal_id": 0,
                         }
                     )
@@ -687,7 +890,7 @@ class ProcessorTests(unittest.TestCase):
                 )
                 rows = list(reader)
             self.assertEqual([row["qc_record_id"] for row in rows], ["QC1", "QC2"])
-            self.assertEqual(rows[0]["analysis_start_global_frame"], "10")
+            self.assertEqual(rows[0]["analysis_start_frame"], "10")
             self.assertEqual(rows[0]["recording_date"], "20260724")
             self.assertEqual(rows[0]["video_year"], "2026")
             self.assertEqual(rows[0]["recording_time"], "1201")

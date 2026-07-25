@@ -12,12 +12,13 @@ import json
 import math
 import os
 import re
+import textwrap
 from pathlib import Path
 
 import numpy as np
 
 
-SCRIPT_VERSION = "0.4.0"
+SCRIPT_VERSION = "0.5.0"
 
 IDTRACKER_TRAJECTORY_SOURCES = {
     "validated.npy": "IDTRACKER_VALIDATED",
@@ -31,9 +32,9 @@ IDTRACKER_TRAJECTORY_SOURCES = {
 
 OUTPUT_COLUMNS = [
     "script_version",
-    "analysis_start_global_frame",
+    "analysis_start_frame",
     "analysis_timespan_frames",
-    "analysis_end_global_frame_inclusive",
+    "analysis_end_frame_inclusive",
     "analysis_frame_observations_inclusive",
     "movement_threshold_px",
     "idtracker_animal_id",
@@ -41,6 +42,9 @@ OUTPUT_COLUMNS = [
     "threshold_crossing_global_frame",
     "latency_to_threshold_frames",
     "total_distance_px_in_analysis_window",
+    "jump_threshold_px",
+    "jump_artifact_coordinate_frames_excluded",
+    "jump_qc_status",
     "wall_buffer_px",
     "frames_inside_wall_buffer",
     "frames_outside_wall_buffer",
@@ -84,6 +88,9 @@ OUTPUT_COLUMNS = [
     "trajectory_source_kind",
     "session_folder",
     "trajectory_file",
+    "archived_original_start_frame",
+    "start_frame_decision_source",
+    "start_frame_decision_provenance",
 ]
 
 
@@ -268,6 +275,7 @@ validate_interpolated_trajectory_source = validate_trajectory_source
 def compute_social_candidates(
     window_arr: np.ndarray,
     social_distance_threshold_px: float = 60.0,
+    eligible_missing_mask: np.ndarray | None = None,
 ) -> dict:
     """Return auditable fight-only social-distance and disappearance masks.
 
@@ -296,6 +304,17 @@ def compute_social_candidates(
         }
 
     valid = np.isfinite(window_arr).all(axis=2)
+    if eligible_missing_mask is None:
+        eligible_missing_mask = ~valid
+    else:
+        eligible_missing_mask = np.asarray(
+            eligible_missing_mask, dtype=bool
+        )
+        if eligible_missing_mask.shape != valid.shape:
+            raise ValueError(
+                "eligible_missing_mask must match the trajectory frame/animal "
+                f"shape {valid.shape}; received {eligible_missing_mask.shape}"
+            )
     both_valid = valid[:, 0] & valid[:, 1]
     distance = np.full(frame_count, np.nan)
     difference = window_arr[:, 0, :] - window_arr[:, 1, :]
@@ -308,7 +327,11 @@ def compute_social_candidates(
     disappearance_events = []
 
     for missing_animal in (0, 1):
-        run_mask = (~valid[:, missing_animal]) & valid[:, 1 - missing_animal]
+        run_mask = (
+            (~valid[:, missing_animal])
+            & eligible_missing_mask[:, missing_animal]
+            & valid[:, 1 - missing_animal]
+        )
         changes = np.diff(
             np.concatenate(([False], run_mask, [False])).astype(np.int8)
         )
@@ -366,6 +389,102 @@ def compute_social_candidates(
     }
 
 
+def filter_jump_artifact_coordinates(
+    xy: np.ndarray,
+    threshold_px: float = 50.0,
+    return_horizon_frames: int = 120,
+) -> dict:
+    """Exclude impossible out-and-return coordinates without interpolation.
+
+    A jump begins only when two adjacent, finite coordinates are separated by
+    more than ``threshold_px``. If the trajectory returns within
+    ``threshold_px`` of the pre-jump coordinate within the review horizon, all
+    coordinates from the jump destination through the frame before that return
+    are excluded. If no return is found, the remainder of the analysis window
+    is excluded and the event is flagged as persistent. This conservative
+    behavior prevents a relocated tracking artifact from contaminating any
+    distance or spatial calculation.
+
+    The input array is never changed. Exclusion is represented as NaN in a
+    cleaned copy, and every event remains auditable.
+    """
+    xy = np.asarray(xy, dtype=float)
+    if xy.ndim != 2 or xy.shape[1] != 2:
+        raise ValueError("Jump QC expects a frames-by-2 coordinate array")
+    if threshold_px <= 0 or return_horizon_frames < 1:
+        raise ValueError(
+            "Jump threshold and return horizon must both be positive"
+        )
+
+    valid = np.isfinite(xy).all(axis=1)
+    step_distance = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    jump_edges = np.flatnonzero(
+        valid[:-1] & valid[1:] & (step_distance > threshold_px)
+    )
+    excluded = np.zeros(len(xy), dtype=bool)
+    events = []
+    persistent_events = 0
+
+    for edge in jump_edges:
+        # This edge is already inside a previously classified excursion.
+        if excluded[edge]:
+            continue
+        pre_jump = xy[edge]
+        search_stop = min(
+            len(xy), edge + 2 + int(return_horizon_frames)
+        )
+        return_frame = None
+        for candidate in range(edge + 2, search_stop):
+            if (
+                valid[candidate]
+                and np.linalg.norm(xy[candidate] - pre_jump)
+                <= threshold_px
+            ):
+                return_frame = candidate
+                break
+
+        if return_frame is None:
+            excluded[edge + 1 :] = True
+            persistent_events += 1
+            event_end = len(xy) - 1
+            event_status = "PERSISTENT_NO_RETURN_WITHIN_HORIZON"
+        else:
+            excluded[edge + 1 : return_frame] = True
+            event_end = return_frame - 1
+            event_status = "RETURNED_TO_PRE_JUMP_LOCATION"
+        events.append(
+            {
+                "jump_edge_offset": int(edge),
+                "jump_destination_offset": int(edge + 1),
+                "excluded_start_offset": int(edge + 1),
+                "excluded_end_offset": int(event_end),
+                "return_offset": (
+                    int(return_frame) if return_frame is not None else None
+                ),
+                "step_px": float(step_distance[edge]),
+                "status": event_status,
+            }
+        )
+        if return_frame is None:
+            break
+
+    cleaned = xy.copy()
+    cleaned[excluded] = np.nan
+    if persistent_events:
+        status = "PERSISTENT_JUMP_REMAINDER_EXCLUDED_REVIEW_START"
+    elif events:
+        status = "RETURNING_JUMP_ARTIFACT_COORDINATES_EXCLUDED"
+    else:
+        status = "PASS_NO_JUMPS_OVER_THRESHOLD"
+    return {
+        "cleaned_xy": cleaned,
+        "excluded_mask": excluded,
+        "events": events,
+        "persistent_events": persistent_events,
+        "status": status,
+    }
+
+
 def _events_from_mask(mask: np.ndarray) -> list[dict]:
     """Return contiguous inclusive event runs for one Boolean frame mask."""
     changes = np.diff(
@@ -408,6 +527,42 @@ def exclude_turtling_candidates_on_fungus(
     adjusted["events"] = _events_from_mask(mask)
     adjusted["fungus_excluded_mask"] = excluded
     return adjusted
+
+
+def continuous_path_segments(
+    xy: np.ndarray,
+    maximum_step_px: float,
+) -> list[tuple[np.ndarray, np.ndarray]]:
+    """Return contiguous plotted path segments without missing or large steps.
+
+    Each tuple contains the original frame offsets and their coordinates.
+    Rejected transitions are not drawn, and no coordinates are interpolated.
+    """
+    xy = np.asarray(xy, dtype=float)
+    valid = np.isfinite(xy).all(axis=1)
+    if len(xy) < 2:
+        return []
+    step_lengths = np.linalg.norm(np.diff(xy, axis=0), axis=1)
+    accepted_edges = (
+        valid[:-1] & valid[1:] & (step_lengths <= maximum_step_px)
+    )
+    segments = []
+    run_start = None
+    for edge_index, accepted in enumerate(accepted_edges):
+        if accepted and run_start is None:
+            run_start = edge_index
+        if run_start is not None and (
+            not accepted or edge_index == len(accepted_edges) - 1
+        ):
+            run_stop = (
+                edge_index + 1
+                if accepted and edge_index == len(accepted_edges) - 1
+                else edge_index
+            )
+            offsets = np.arange(run_start, run_stop + 1)
+            segments.append((offsets, xy[offsets]))
+            run_start = None
+    return segments
 
 
 def compute_turtling_candidates(
@@ -512,12 +667,16 @@ def analyze(
     analysis_type: str = "",
     social_distance_threshold_px: float = 60.0,
     use_social_disappearance_in_calculations: bool = False,
+    one_frame_jump_threshold_px: float = 50.0,
     turtling_window_frames: int = 120,
     turtling_min_path_px: float = 120.0,
     turtling_max_radius90_px: float = 35.0,
     turtling_min_turn_rotations: float = 3.0,
     turtling_max_straightness: float = 0.25,
     turtling_max_step_px: float = 20.0,
+    analysis_start_original_global_frame: int | None = None,
+    analysis_start_source: str = "SOURCE_INTERVAL",
+    analysis_start_adjustment_provenance: str = "",
 ) -> list[dict]:
     if start <= 0:
         raise ValueError("Analysis start must be greater than zero; zero is a data-entry flag")
@@ -527,6 +686,8 @@ def analyze(
         raise ValueError("ROI-buffer widths cannot be negative")
     if social_distance_threshold_px <= 0:
         raise ValueError("The social-distance threshold must be positive")
+    if one_frame_jump_threshold_px <= 0:
+        raise ValueError("The one-frame jump threshold must be positive")
     if turtling_window_frames < 3:
         raise ValueError("The turtling window must contain at least 3 frames")
     if (
@@ -565,15 +726,28 @@ def analyze(
             "Processing stopped because the array may be interval-relative."
         )
     window_arr = arr[start : end_inclusive + 1]
+    raw_missing_mask = ~np.isfinite(window_arr).all(axis=2)
+    original_jump_qc = [
+        filter_jump_artifact_coordinates(
+            window_arr[:, animal, :],
+            threshold_px=one_frame_jump_threshold_px,
+        )
+        for animal in range(window_arr.shape[1])
+    ]
+    jump_filtered_arr = np.stack(
+        [result["cleaned_xy"] for result in original_jump_qc],
+        axis=1,
+    )
     social = (
         compute_social_candidates(
-            window_arr,
+            jump_filtered_arr,
             social_distance_threshold_px=social_distance_threshold_px,
+            eligible_missing_mask=raw_missing_mask,
         )
         if is_fight
         else None
     )
-    calculation_arr = window_arr.copy()
+    calculation_arr = jump_filtered_arr.copy()
     imputed_frames_by_animal = np.zeros(
         window_arr.shape[1], dtype=int
     )
@@ -587,15 +761,36 @@ def analyze(
                 :, missing_animal
             ]
             calculation_arr[impute_mask, missing_animal, :] = (
-                window_arr[impute_mask, 1 - missing_animal, :]
+                jump_filtered_arr[impute_mask, 1 - missing_animal, :]
             )
+    calculation_jump_qc = [
+        filter_jump_artifact_coordinates(
+            calculation_arr[:, animal, :],
+            threshold_px=one_frame_jump_threshold_px,
+        )
+        for animal in range(window_arr.shape[1])
+    ]
+    calculation_arr = np.stack(
+        [result["cleaned_xy"] for result in calculation_jump_qc],
+        axis=1,
+    )
+    if (
+        use_social_disappearance_in_calculations
+        and social is not None
+        and social["status"] == "CALCULATED_FIGHT_TWO_ANIMALS"
+    ):
+        calculation_valid = np.isfinite(calculation_arr).all(axis=2)
+        for missing_animal in (0, 1):
+            impute_mask = social["disappearance_masks_by_animal"][
+                :, missing_animal
+            ]
             imputed_frames_by_animal[missing_animal] = int(
-                impute_mask.sum()
+                (impute_mask & calculation_valid[:, missing_animal]).sum()
             )
     turtling_by_animal = [
         exclude_turtling_candidates_on_fungus(
             compute_turtling_candidates(
-                window_arr[:, animal, :],
+                jump_filtered_arr[:, animal, :],
                 window_frames=turtling_window_frames,
                 min_path_px=turtling_min_path_px,
                 max_radius90_px=turtling_max_radius90_px,
@@ -603,7 +798,7 @@ def analyze(
                 max_straightness=turtling_max_straightness,
                 max_step_px=turtling_max_step_px,
             ),
-            window_arr[:, animal, :],
+            jump_filtered_arr[:, animal, :],
             secondary_roi,
         )
         for animal in range(window_arr.shape[1])
@@ -612,7 +807,7 @@ def analyze(
     if is_fight:
         starting_sides = ["UNASSIGNED_EXPECTED_TWO_ANIMALS"] * window_arr.shape[1]
         if window_arr.shape[1] == 2:
-            start_xy = window_arr[0]
+            start_xy = jump_filtered_arr[0]
             if not np.isfinite(start_xy).all():
                 starting_sides = ["UNASSIGNED_MISSING_START_COORDINATE"] * 2
             elif math.isclose(
@@ -628,7 +823,9 @@ def analyze(
                 starting_sides = ["RIGHT", "LEFT"]
     output = []
     for individual in range(window_arr.shape[1]):
-        observed_xy = window_arr[:, individual, :]
+        raw_observed_xy = window_arr[:, individual, :]
+        observed_xy = jump_filtered_arr[:, individual, :]
+        raw_valid = np.isfinite(raw_observed_xy).all(axis=1)
         original_valid = np.isfinite(observed_xy).all(axis=1)
         xy = calculation_arr[:, individual, :]
         valid = np.isfinite(xy).all(axis=1)
@@ -646,6 +843,24 @@ def analyze(
                 "remaining invalid distance steps are excluded without gap bridging."
             )
 
+        original_differences = observed_xy[1:] - observed_xy[:-1]
+        original_step_distances = np.sqrt(
+            np.sum(original_differences ** 2, axis=1)
+        )
+        original_valid_steps = original_valid[:-1] & original_valid[1:]
+        original_accepted_steps = (
+            original_valid_steps
+            & (original_step_distances <= one_frame_jump_threshold_px)
+        )
+        latency_reachable = np.zeros(len(observed_xy), dtype=bool)
+        if original_valid[0]:
+            latency_reachable[0] = True
+            for frame_offset in range(1, len(observed_xy)):
+                latency_reachable[frame_offset] = (
+                    latency_reachable[frame_offset - 1]
+                    and original_accepted_steps[frame_offset - 1]
+                )
+
         if not original_valid[0]:
             status = "NOT_CALCULATED"
             warnings.append(
@@ -662,29 +877,39 @@ def analyze(
                     axis=1,
                 )
             )
-            hits = np.flatnonzero(displacement >= threshold)
+            hits = np.flatnonzero(
+                (displacement >= threshold) & latency_reachable
+            )
             if hits.size:
                 latency = int(hits[0])
                 crossing = start + latency
             else:
                 status = "THRESHOLD_NOT_REACHED"
                 warnings.append(
-                    "Threshold was not reached within the requested window."
+                    "Threshold was not reached through a continuous sequence "
+                    "of valid steps at or below the one-frame jump threshold."
                 )
 
         differences = xy[1:] - xy[:-1]
         step_distances = np.sqrt(np.sum(differences ** 2, axis=1))
         valid_steps = valid[:-1] & valid[1:]
+        accepted_steps = (
+            valid_steps
+            & (step_distances <= one_frame_jump_threshold_px)
+        )
+        jump_qc = original_jump_qc[individual]
+        jump_artifact_frames = int(jump_qc["excluded_mask"].sum())
         if valid_steps.any():
-            total_distance = float(step_distances[valid_steps].sum())
+            total_distance = float(step_distances[accepted_steps].sum())
         else:
             total_distance = ""
             warnings.append(
-                "No adjacent frame pair had valid coordinates at both endpoints; "
-                "total distance was not calculated."
+                "No adjacent frame pair had valid coordinates at both endpoints "
+                "and a step at or below the one-frame jump threshold; total "
+                "distance was not calculated."
             )
         excluded_steps = int((~valid_steps).sum())
-        missing_coordinate_frames = int((~original_valid).sum())
+        missing_coordinate_frames = int((~raw_valid).sum())
         if missing_coordinate_frames:
             warnings.append(
                 f"The selected IDtracker {trajectory_source_kind} file still "
@@ -714,6 +939,21 @@ def analyze(
                 f"Distance excluded {excluded_steps} adjacent-frame pair(s) "
                 "with a missing coordinate at one or both endpoints; remaining "
                 "gaps were not bridged."
+            )
+        if jump_artifact_frames:
+            warnings.append(
+                f"ANTI_JUMP_COORDINATE_QC: excluded {jump_artifact_frames} "
+                f"coordinate frame(s) initiated by a greater-than-"
+                f"{one_frame_jump_threshold_px:g}-pixel adjacent-frame jump. "
+                "These coordinates were excluded from latency, distance, wall, "
+                "fungus, social, and turtling calculations without interpolation."
+            )
+        if jump_qc["persistent_events"]:
+            warnings.append(
+                "PERSISTENT_JUMP_REVIEW_START: at least one jump did not return "
+                "near its pre-jump position within 120 frames, so the remaining "
+                "coordinates were conservatively excluded. Review the analysis "
+                "start with the GUI Jump Audit."
             )
         turtling_result = turtling_by_animal[individual]
         turtling_candidate_frames = int(
@@ -771,23 +1011,23 @@ def analyze(
             midpoint_distance_to_wall = np.full(
                 len(step_distances), np.nan
             )
-            if valid_steps.any():
+            if accepted_steps.any():
                 midpoints = (xy[:-1] + xy[1:]) / 2.0
-                midpoint_in_roi[valid_steps] = points_inside_polygon(
-                    midpoints[valid_steps], primary_roi
+                midpoint_in_roi[accepted_steps] = points_inside_polygon(
+                    midpoints[accepted_steps], primary_roi
                 )
-                midpoint_distance_to_wall[valid_steps] = (
+                midpoint_distance_to_wall[accepted_steps] = (
                     distance_to_polygon_boundary(
-                        midpoints[valid_steps], primary_roi
+                        midpoints[accepted_steps], primary_roi
                     )
                 )
             step_in_wall = (
-                valid_steps
+                accepted_steps
                 & midpoint_in_roi
                 & (midpoint_distance_to_wall <= wall_buffer_px)
             )
             step_outside_wall = (
-                valid_steps
+                accepted_steps
                 & midpoint_in_roi
                 & (midpoint_distance_to_wall > wall_buffer_px)
             )
@@ -798,7 +1038,7 @@ def analyze(
 
             frames_outside_roi = int((valid & ~inside_roi).sum())
             distance_outside_roi = float(
-                step_distances[valid_steps & ~midpoint_in_roi].sum()
+                step_distances[accepted_steps & ~midpoint_in_roi].sum()
             )
             frame_ok = (
                 frames_in_wall + frames_outside_wall
@@ -863,18 +1103,18 @@ def analyze(
                 segment_distance_to_fungus_edge = np.full(
                     len(step_distances), np.nan
                 )
-                if valid_steps.any():
+                if accepted_steps.any():
                     midpoints = (xy[:-1] + xy[1:]) / 2.0
-                    segment_on_fungus[valid_steps] = points_inside_polygon(
-                        midpoints[valid_steps], secondary_roi
+                    segment_on_fungus[accepted_steps] = points_inside_polygon(
+                        midpoints[accepted_steps], secondary_roi
                     )
-                    segment_distance_to_fungus_edge[valid_steps] = (
+                    segment_distance_to_fungus_edge[accepted_steps] = (
                         distance_to_polygon_boundary(
-                            midpoints[valid_steps], secondary_roi
+                            midpoints[accepted_steps], secondary_roi
                         )
                     )
                 segment_in_fungus_buffer = (
-                    valid_steps
+                    accepted_steps
                     & segment_on_fungus
                     & (
                         segment_distance_to_fungus_edge
@@ -882,7 +1122,7 @@ def analyze(
                     )
                 )
                 segment_in_fungus_interior = (
-                    valid_steps
+                    accepted_steps
                     & segment_on_fungus
                     & (
                         segment_distance_to_fungus_edge
@@ -890,7 +1130,9 @@ def analyze(
                     )
                 )
                 distance_on_fungus = float(
-                    step_distances[valid_steps & segment_on_fungus].sum()
+                    step_distances[
+                        accepted_steps & segment_on_fungus
+                    ].sum()
                 )
                 distance_in_fungus_buffer = float(
                     step_distances[segment_in_fungus_buffer].sum()
@@ -932,7 +1174,7 @@ def analyze(
             if social_status == "CALCULATED_FIGHT_TWO_ANIMALS":
                 social_frames = int(social["within_mask"].sum())
                 social_steps = (
-                    valid_steps
+                    accepted_steps
                     & social["within_mask"][:-1]
                     & social["within_mask"][1:]
                 )
@@ -959,9 +1201,9 @@ def analyze(
         output.append(
             {
                 "script_version": SCRIPT_VERSION,
-                "analysis_start_global_frame": start,
+                "analysis_start_frame": start,
                 "analysis_timespan_frames": window,
-                "analysis_end_global_frame_inclusive": end_inclusive,
+                "analysis_end_frame_inclusive": end_inclusive,
                 "analysis_frame_observations_inclusive": window + 1,
                 "movement_threshold_px": threshold,
                 "idtracker_animal_id": individual,
@@ -969,6 +1211,11 @@ def analyze(
                 "threshold_crossing_global_frame": crossing,
                 "latency_to_threshold_frames": latency,
                 "total_distance_px_in_analysis_window": total_distance,
+                "jump_threshold_px": one_frame_jump_threshold_px,
+                "jump_artifact_coordinate_frames_excluded": (
+                    jump_artifact_frames
+                ),
+                "jump_qc_status": jump_qc["status"],
                 "wall_buffer_px": wall_buffer_px,
                 "frames_inside_wall_buffer": frames_in_wall,
                 "frames_outside_wall_buffer": frames_outside_wall,
@@ -1024,16 +1271,25 @@ def analyze(
                 "baseline_x_px": baseline_x,
                 "baseline_y_px": baseline_y,
                 "valid_coordinate_frames_in_window": int(
-                    original_valid.sum()
+                    raw_valid.sum()
                 ),
                 "missing_coordinate_frames_in_window": int(
-                    (~original_valid).sum()
+                    (~raw_valid).sum()
                 ),
                 "result_status": status,
                 "warning": warning,
                 "trajectory_source_kind": trajectory_source_kind,
                 "session_folder": str(session_folder),
                 "trajectory_file": str(trajectory_file),
+                "archived_original_start_frame": (
+                    start
+                    if analysis_start_original_global_frame is None
+                    else analysis_start_original_global_frame
+                ),
+                "start_frame_decision_source": analysis_start_source,
+                "start_frame_decision_provenance": (
+                    analysis_start_adjustment_provenance
+                ),
             }
         )
     return output
@@ -1063,9 +1319,21 @@ def write_plot_pdf(
         ) from exc
 
     arr = load_trajectories(trajectory_file)
-    start = int(rows[0]["analysis_start_global_frame"])
-    end = int(rows[0]["analysis_end_global_frame_inclusive"])
-    window_arr = arr[start : end + 1]
+    start = int(rows[0]["analysis_start_frame"])
+    end = int(rows[0]["analysis_end_frame_inclusive"])
+    raw_window_arr = arr[start : end + 1]
+    one_frame_jump_threshold_px = float(rows[0]["jump_threshold_px"])
+    plot_jump_qc = [
+        filter_jump_artifact_coordinates(
+            raw_window_arr[:, animal, :],
+            threshold_px=one_frame_jump_threshold_px,
+        )
+        for animal in range(raw_window_arr.shape[1])
+    ]
+    window_arr = np.stack(
+        [result["cleaned_xy"] for result in plot_jump_qc],
+        axis=1,
+    )
     global_frames = np.arange(start, end + 1)
     is_fight = "fight" in analysis_type.strip().lower()
     social = (
@@ -1073,6 +1341,9 @@ def write_plot_pdf(
             window_arr,
             social_distance_threshold_px=float(
                 rows[0]["social_distance_threshold_px"]
+            ),
+            eligible_missing_mask=(
+                ~np.isfinite(raw_window_arr).all(axis=2)
             ),
         )
         if is_fight
@@ -1179,6 +1450,41 @@ def write_plot_pdf(
                 loc="upper center", bbox_to_anchor=(0.5, -0.12), ncol=2,
             )
 
+    def draw_filtered_path_2d(ax, xy, **plot_kwargs):
+        label = plot_kwargs.pop("label", None)
+        segments = continuous_path_segments(
+            xy, one_frame_jump_threshold_px
+        )
+        for segment_index, (_offsets, segment_xy) in enumerate(segments):
+            ax.plot(
+                segment_xy[:, 0],
+                segment_xy[:, 1],
+                label=label if segment_index == 0 else None,
+                **plot_kwargs,
+            )
+        if not segments and label:
+            ax.plot([], [], label=label, **plot_kwargs)
+
+    def draw_jump_endpoints_2d(ax, xy, label):
+        xy = np.asarray(xy, dtype=float)
+        jump_qc = filter_jump_artifact_coordinates(
+            xy, threshold_px=one_frame_jump_threshold_px
+        )
+        endpoints = np.flatnonzero(jump_qc["excluded_mask"])
+        if not endpoints.size:
+            return
+        ax.scatter(
+            xy[endpoints, 0],
+            xy[endpoints, 1],
+            s=8,
+            marker="x",
+            color="#666666",
+            linewidth=0.45,
+            alpha=0.30,
+            label=label,
+            zorder=4,
+        )
+
     def draw_turtling_overlay_2d(ax, animal, xy):
         candidate = xy.copy()
         candidate[~turtling_by_animal[animal]["mask"]] = np.nan
@@ -1200,16 +1506,23 @@ def write_plot_pdf(
         draw_rois_2d(ax)
         for animal, xy in enumerate(window_arr.transpose(1, 0, 2)):
             finite = np.isfinite(xy).all(axis=1)
-            plotted = xy.copy()
-            plotted[~finite] = np.nan
             label = (
                 f"IDtracker animal {animal} "
                 f"({rows[animal]['starting_side']})"
             )
-            ax.plot(
-                plotted[:, 0], plotted[:, 1],
+            draw_filtered_path_2d(
+                ax,
+                xy,
                 color=colors[animal % len(colors)], linewidth=0.65,
                 alpha=0.8, label=label,
+            )
+            draw_jump_endpoints_2d(
+                ax,
+                raw_window_arr[:, animal, :],
+                label=(
+                    f"animal {animal} raw coordinate excluded by "
+                    f">{one_frame_jump_threshold_px:g} px jump QC"
+                ),
             )
             draw_turtling_overlay_2d(ax, animal, xy)
             if finite[0]:
@@ -1238,12 +1551,19 @@ def write_plot_pdf(
             add_page_identity(fig)
             draw_rois_2d(ax)
             finite = np.isfinite(xy).all(axis=1)
-            plotted = xy.copy()
-            plotted[~finite] = np.nan
-            ax.plot(
-                plotted[:, 0], plotted[:, 1],
+            draw_filtered_path_2d(
+                ax,
+                xy,
                 color=colors[animal % len(colors)], linewidth=0.7,
                 alpha=0.85, label=f"IDtracker animal {animal} track",
+            )
+            draw_jump_endpoints_2d(
+                ax,
+                raw_window_arr[:, animal, :],
+                label=(
+                    f"raw coordinate excluded by "
+                    f">{one_frame_jump_threshold_px:g} px jump QC"
+                ),
             )
             draw_turtling_overlay_2d(ax, animal, xy)
             if finite[0]:
@@ -1279,13 +1599,17 @@ def write_plot_pdf(
                 rows_of_plots, columns, animal, projection="3d"
             )
             finite = np.isfinite(xy).all(axis=1)
-            plotted = xy.copy()
-            plotted[~finite] = np.nan
-            ax.plot(
-                plotted[:, 0], plotted[:, 1], global_frames,
-                color=colors[(animal - 1) % len(colors)],
-                linewidth=0.7, alpha=0.85,
-            )
+            for offsets, segment_xy in continuous_path_segments(
+                xy, one_frame_jump_threshold_px
+            ):
+                ax.plot(
+                    segment_xy[:, 0],
+                    segment_xy[:, 1],
+                    global_frames[offsets],
+                    color=colors[(animal - 1) % len(colors)],
+                    linewidth=0.7,
+                    alpha=0.85,
+                )
             candidate_mask = turtling_by_animal[animal - 1]["mask"]
             candidate = xy.copy()
             candidate[~candidate_mask] = np.nan
@@ -1361,17 +1685,19 @@ def write_plot_pdf(
             draw_rois_2d(ax)
             for animal, xy in enumerate(window_arr.transpose(1, 0, 2)):
                 finite = np.isfinite(xy).all(axis=1)
-                base = xy.copy()
-                base[~finite] = np.nan
-                ax.plot(
-                    base[:, 0], base[:, 1], color="#A0A0A0",
+                draw_filtered_path_2d(
+                    ax,
+                    xy,
+                    color="#A0A0A0",
                     linewidth=0.6, alpha=0.55,
                     label=f"animal {animal} full track",
                 )
                 within = xy.copy()
                 within[~(finite & social["within_mask"])] = np.nan
-                ax.plot(
-                    within[:, 0], within[:, 1], color="#E60049",
+                draw_filtered_path_2d(
+                    ax,
+                    within,
+                    color="#E60049",
                     linewidth=2.6, alpha=0.95,
                     label="both visible and within social distance",
                 )
@@ -1379,8 +1705,9 @@ def write_plot_pdf(
                 disappearance[
                     ~(finite & social["disappearance_mask"])
                 ] = np.nan
-                ax.plot(
-                    disappearance[:, 0], disappearance[:, 1],
+                draw_filtered_path_2d(
+                    ax,
+                    disappearance,
                     color="#7A1FA2", linewidth=2.8, alpha=0.95,
                     label="visible animal while partner disappears",
                 )
@@ -1506,10 +1833,9 @@ def write_plot_pdf(
             draw_rois_2d(ax)
             for animal, xy in enumerate(window_arr.transpose(1, 0, 2)):
                 finite = np.isfinite(xy).all(axis=1)
-                plotted = xy.copy()
-                plotted[~finite] = np.nan
-                ax.plot(
-                    plotted[:, 0], plotted[:, 1],
+                draw_filtered_path_2d(
+                    ax,
+                    xy,
                     color=colors[animal % len(colors)],
                     linewidth=0.45, alpha=0.28,
                 )
@@ -1549,9 +1875,40 @@ def write_plot_pdf(
             f"Canonical session: {session_folder.name}",
             f"Analysis: {analysis_type or 'unspecified'}",
             f"Inclusive global frames: {start} through {end}",
+            (
+                "Archived original start: "
+                f"{rows[0]['archived_original_start_frame']}"
+            ),
+            (
+                "Start decision source: "
+                f"{rows[0]['start_frame_decision_source']}"
+            ),
+            (
+                "Start decision provenance: "
+                f"{rows[0]['start_frame_decision_provenance'] or 'no adjustment'}"
+            ),
             f"End minus start: {end - start} frames",
             f"Coordinate observations in a complete window: {end - start + 1}",
             f"Displacement threshold: {rows[0]['movement_threshold_px']} pixels",
+            (
+                "Coordinate-jump threshold: review adjacent movement > "
+                f"{rows[0]['jump_threshold_px']} pixels"
+            ),
+            (
+                "Jump-artifact coordinate frames excluded by animal: "
+                + "; ".join(
+                    f"{row['idtracker_animal_id']}="
+                    f"{row['jump_artifact_coordinate_frames_excluded']}"
+                    for row in rows
+                )
+            ),
+            (
+                "Jump QC status by animal: "
+                + "; ".join(
+                    f"{row['idtracker_animal_id']}={row['jump_qc_status']}"
+                    for row in rows
+                )
+            ),
             f"Trajectory source: {rows[0]['trajectory_source_kind']}",
             f"Primary wall buffer: {rows[0]['wall_buffer_px']} pixels inward",
             (
@@ -1633,13 +1990,28 @@ def write_plot_pdf(
                     "Optional social-disappearance partner-centroid substitution: "
                     f"{'ENABLED' if use_social_imputation else 'DISABLED'}."
                 ),
-                "Lines break at coordinates missing in the selected IDtracker file.",
+                (
+                    "Track lines break at original missing coordinates and "
+                    "jump-artifact coordinates excluded by QC."
+                ),
                 "All axes use pixels or global frames; no seconds are used.",
             ]
         )
+        wrapped_summary_lines = []
+        for line in summary_lines:
+            wrapped_summary_lines.extend(
+                textwrap.wrap(
+                    line,
+                    width=100,
+                    subsequent_indent="  ",
+                    break_long_words=False,
+                    break_on_hyphens=False,
+                )
+                or [""]
+            )
         fig.text(
-            0.08, 0.88, "\n".join(summary_lines),
-            va="top", ha="left", fontsize=9.5, family="monospace",
+            0.06, 0.88, "\n".join(wrapped_summary_lines),
+            va="top", ha="left", fontsize=8.5, family="monospace",
         )
         pdf.savefig(fig)
         plt.close(fig)
@@ -1656,6 +2028,9 @@ def main() -> int:
     parser.add_argument("--fungus-buffer-px", default=30.0, type=float)
     parser.add_argument(
         "--social-distance-threshold-px", default=60.0, type=float
+    )
+    parser.add_argument(
+        "--one-frame-jump-threshold-px", default=50.0, type=float
     )
     parser.add_argument(
         "--use-social-disappearance-in-calculations",
@@ -1678,6 +2053,13 @@ def main() -> int:
     )
     parser.add_argument("--turtling-max-step-px", default=20.0, type=float)
     parser.add_argument("--analysis-type", default="")
+    parser.add_argument("--analysis-start-original-global-frame", type=int)
+    parser.add_argument(
+        "--analysis-start-source", default="SOURCE_INTERVAL"
+    )
+    parser.add_argument(
+        "--analysis-start-adjustment-provenance", default=""
+    )
     parser.add_argument("--video", default="")
     parser.add_argument("--cell-label", default="")
     parser.add_argument("--qc-record-id", default="")
@@ -1703,12 +2085,20 @@ def main() -> int:
         use_social_disappearance_in_calculations=(
             args.use_social_disappearance_in_calculations
         ),
+        one_frame_jump_threshold_px=args.one_frame_jump_threshold_px,
         turtling_window_frames=args.turtling_window_frames,
         turtling_min_path_px=args.turtling_min_path_px,
         turtling_max_radius90_px=args.turtling_max_radius90_px,
         turtling_min_turn_rotations=args.turtling_min_turn_rotations,
         turtling_max_straightness=args.turtling_max_straightness,
         turtling_max_step_px=args.turtling_max_step_px,
+        analysis_start_original_global_frame=(
+            args.analysis_start_original_global_frame
+        ),
+        analysis_start_source=args.analysis_start_source,
+        analysis_start_adjustment_provenance=(
+            args.analysis_start_adjustment_provenance
+        ),
     )
     destination = Path(args.output)
     destination.parent.mkdir(parents=True, exist_ok=True)

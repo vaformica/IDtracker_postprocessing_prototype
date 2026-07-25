@@ -57,12 +57,14 @@ connection form. Its default is
 `~/miniconda3/envs/idtracker_reprocess_v1/bin/python`. Tkinter is required only
 on the Mac.
 
-The interface is divided into three tabs:
+The interface is divided into four tabs:
 
 - **Setup & Run** contains the SSH connection, scientific parameters, process
   button, and result downloads.
 - **Sessions** contains the full approved-session table, filters, start-time
   tools, and trajectory report.
+- **Jump Audit** contains video-level BA and fight disturbance results and the
+  explicit approval button for suggested replacement starts.
 - **Logs & Diagnostics** contains live SSH progress and diagnostic tools.
 
 Workflow:
@@ -77,13 +79,16 @@ Workflow:
 5. Correct missing, ambiguous, or zero starts with **Edit selected start frame**.
    Alternatively, use **Export sessions needing start times**, fill only
    `enter_start_global_frame`, and use **Import completed start-time CSV**.
-6. For examples, double-click individual **Process?** cells. For a large
+6. Click **Audit jumps in all ready BA + fights**. Review any video-wide
+   disturbance recommendation in the Jump Audit tab. No start changes until
+   you select a video and click **Approve selected start recommendation**.
+7. For examples, double-click individual **Process?** cells. For a large
    reviewed batch, filter to **Ready to process** and click
    **Check all filtered ready sessions**.
-7. Confirm the inclusive 7200-frame timespan (`end - start`), 30-pixel
+8. Confirm the inclusive 7200-frame timespan (`end - start`), 30-pixel
    displacement threshold, both ROI-buffer widths, and the fight social
    distance threshold (default 60 pixels).
-8. Process, then download the combined CSV and PDF plot folder.
+9. Process, then download the combined CSV and PDF plot folder.
 
 A successful or collected run is never treated as scientifically approved
 unless the authoritative QC table marks it approved. Folder names and TOML
@@ -133,7 +138,37 @@ missing in the selected file are reported in the CSV and warning. Raw fallback
 rows additionally contain a `RAW_IDTRACKER_INPUT` warning.
 `total_distance_px_in_analysis_window` is the sum of valid adjacent-frame
 Euclidean steps from the inclusive start through the inclusive end. Missing
-segments are excluded without additional interpolation or gap bridging.
+segments are excluded without additional interpolation or gap bridging. The
+editable jump threshold defaults to 50 pixels. When an adjacent finite step is
+strictly greater, the processor searches up to 120 frames for a return near the
+pre-jump position. Coordinates in a returning excursion are excluded from every
+calculation. If there is no return, the remainder is conservatively excluded
+and flagged for start review. Raw coordinates are preserved, never
+interpolated, and the CSV reports the threshold, excluded-coordinate count, and
+QC status for every animal.
+
+The Jump Audit evaluates all approved ready BA and fight sessions in one
+read-only Firebird pass. A video-wide disturbance requires synchronized jump
+evidence from at least three distinct approved sessions and at least half of
+the available approved sessions for that video. The proposed start is the next
+50-frame boundary after the final synchronized event, and it is offered only
+when a complete analysis span fits. Cell- or animal-specific jumps do not
+produce a video-level start recommendation.
+
+The main statistical columns use intuitive final-decision names:
+`analysis_start_frame` and `analysis_end_frame_inclusive`. The original start
+and timestamped approval explanation are archived near the end as
+`archived_original_start_frame`, `start_frame_decision_source`, and
+`start_frame_decision_provenance`. Detailed video and track evidence is saved
+separately under
+`~/Downloads/IDtracker_postprocessing_results/jump_audits`.
+
+Latency remains displacement from the exact analysis-entry coordinate, but a
+crossing is accepted only while it is connected to that entry coordinate by a
+continuous chain of valid adjacent steps at or below the anti-jump threshold.
+This prevents a large IDtracker relocation from becoming a false wake event.
+PDF track lines break across original missing coordinates and excluded
+jump-artifact coordinates; subtle gray x marks show the excluded raw positions.
 
 Wall-buffer outputs use primary `roi_list[0]` and a GUI-configurable inward
 buffer (default 30 pixels). Frame classifications use centroids; distance
