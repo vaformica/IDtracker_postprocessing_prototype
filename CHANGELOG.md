@@ -4,6 +4,72 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.6.0 - 2026-07-24
+
+- Kept the researcher-selected one-frame jump threshold at 200 pixels.
+  Adjacent steps exactly equal to 200 pixels are accepted; steps strictly
+  greater are rejected.
+- Reworked jump handling as step-level QC. A rejected adjacent step is omitted
+  from latency chains, distance totals, ROI movement distances, social
+  movement distance, and PDF path connections, while both endpoint coordinates
+  remain available for frame-based wall/fungus counts.
+- Added `one_frame_jump_threshold_px` and `one_frame_jumps_excluded`. Retained
+  `jump_threshold_px` as a compatibility alias and the deprecated
+  `jump_artifact_coordinate_frames_excluded` as zero because coordinates are
+  no longer deleted.
+- Added post-wake calculations from the provisional threshold-crossing frame
+  through the inclusive analysis end. The core adjusted distance denominator
+  is valid adjacent movement steps, not elapsed frames.
+- Added post-wake wall/open frame, step, distance, opportunity-adjusted, and
+  conditional-speed outputs using the existing centroid and segment-midpoint
+  geometry.
+- Added fight-only post-wake fungus on/off outputs and direct
+  open-and-off-fungus intersection outputs. BA fungus/joint numerics are blank
+  with explicit not-applicable statuses.
+- Added explicit unavailable statuses and blank numeric outputs when the exact
+  baseline is invalid, wake is not reached, or no valid post-wake movement
+  opportunity exists.
+- Updated PDF jump marks and metadata to describe rejected steps rather than
+  deleted coordinate frames.
+- Added runtime partition assertions and representative BA, fight, missing-gap,
+  rejected-jump, invalid-baseline, and threshold-not-reached tests.
+
+## 0.5.6 - 2026-07-24
+
+- Added **Load previous settings or results** and
+  **Save current settings and decisions** controls at the top of Setup & Run.
+- Added versioned JSON settings bundles containing visible GUI parameters,
+  positive start decisions with archived originals and provenance, and current
+  Jump Audit summary/track tables.
+- Added direct restoration from existing combined-results CSV files and Jump
+  Audit video CSV files, including automatic sibling track-table loading.
+- Separately loaded Jump Audit decisions supplement previously queued combined
+  CSV decisions, so loading the detailed audit cannot discard session starts.
+- Saved decisions may be loaded before scanning and are applied afterward only
+  to the newly resolved authoritative approved-session table.
+- Matching uses exact QC record ID first, then exact
+  `(video, cell, analysis)` when an approved run has changed. Conflicts reject
+  the restoration; unmatched decisions are explicitly logged.
+- Only Jump Audit rows already marked `APPROVED` restore video-wide starts.
+  Pending recommendations remain display-only.
+- Restored decisions retain prior provenance and append the settings filename
+  and restoration timestamp.
+
+## 0.5.5 - 2026-07-24
+
+- Changed the researcher-selected provisional one-frame jump threshold default
+  from 50 to 200 pixels in the GUI, processor API, CLI, CSV/PDF provenance, and
+  methods documentation.
+- Corrected non-returning jump handling so one discontinuity no longer erases
+  the remainder of the analysis window. The jump-destination coordinate is
+  excluded, no distance is bridged across it, and later finite coordinates
+  resume as a new unconnected segment.
+- Added the explicit
+  `JUMP_DISCONTINUITY_EXCLUDED_TRACK_RESUMED_REVIEW` status and warning because
+  resumed geometry cannot by itself confirm retained biological identity.
+- Preserved the existing returning-excursion rule: all coordinates from the
+  jump destination through the frame before return remain excluded.
+
 ## 0.5.4 - 2026-07-24
 
 - Added the processing-batch date and time to the automatically downloaded CSV

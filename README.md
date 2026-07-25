@@ -60,35 +60,55 @@ on the Mac.
 The interface is divided into four tabs:
 
 - **Setup & Run** contains the SSH connection, scientific parameters, process
-  button, and result downloads.
+  settings, and result downloads.
 - **Sessions** contains the full approved-session table, filters, start-time
-  tools, and trajectory report.
+  tools, process button, and trajectory report.
 - **Jump Audit** contains video-level BA and fight disturbance results and the
   explicit approval button for suggested replacement starts.
 - **Logs & Diagnostics** contains live SSH progress and diagnostic tools.
 
 Workflow:
 
-1. Enter the Firebird pipeline project root. The default is
+1. Optionally click **Load previous settings or results**. The loader accepts a
+   reusable JSON settings bundle, a prior combined-results CSV, or a Jump Audit
+   video-summary CSV. Loading before a scan queues saved start decisions for
+   exact matching after the approved-session scan.
+2. Enter the Firebird pipeline project root. The default is
    `/data/labs/vformic1-swat-lab/idtracker_pipeline_runs`.
-2. Scan. This is read-only. Approval comes only from
+3. Scan. This is read-only. Approval comes only from
    `QC/run_status.csv`, where `qc_decision` is `APPROVED` or legacy `DONE`.
-3. Repeated approved records are grouped by `(video, cell, analysis)`. Only the
+4. Repeated approved records are grouped by `(video, cell, analysis)`. Only the
    greatest `date_run` is retained; `run_index` and metadata path break ties.
-4. Review the detected interval for every selected session.
-5. Correct missing, ambiguous, or zero starts with **Edit selected start frame**.
+5. Review the detected interval for every selected session.
+6. Correct missing, ambiguous, or zero starts with **Edit selected start frame**.
    Alternatively, use **Export sessions needing start times**, fill only
    `enter_start_global_frame`, and use **Import completed start-time CSV**.
-6. Click **Audit jumps in all approved BA + fights**. Review any video-wide
+7. Click **Audit jumps in all approved BA + fights**. Review any video-wide
    disturbance recommendation in the Jump Audit tab. No start changes until
    you select a video and click **Approve selected start recommendation**.
-7. For examples, double-click individual **Process?** cells. For a large
+8. Click **Save current settings and decisions** after start and Jump Audit
+   review. The JSON preserves GUI parameters, positive start decisions with
+   provenance, and the current Jump Audit video/track tables.
+9. For examples, double-click individual **Process?** cells. For a large
    reviewed batch, filter to **Ready to process** and click
    **Check all filtered ready sessions**.
-8. Confirm the inclusive 7200-frame timespan (`end - start`), 30-pixel
+10. Confirm the inclusive 7200-frame timespan (`end - start`), 30-pixel
    displacement threshold, both ROI-buffer widths, and the fight social
    distance threshold (default 60 pixels).
-9. Process, then download the combined CSV and PDF plot folder.
+11. Process, then download the combined CSV and PDF plot folder.
+
+Reusable JSON files default to
+`~/Downloads/IDtracker_postprocessing_results/saved_settings/`. They store the
+SSH key path but never the private-key contents. A prior combined-results CSV
+restores its analysis parameters and deduplicated session starts. A Jump Audit
+video CSV also loads its sibling track CSV when available; only rows explicitly
+marked `APPROVED` restore video-wide starts. Pending recommendations are shown
+but never applied. A separately loaded Jump Audit supplements previously queued
+combined-CSV decisions rather than discarding them. Matching first uses the
+exact QC record ID and then the exact
+`(video, cell, analysis)` key when an approved run has been replaced. Unmatched
+or ambiguous records are logged and are never guessed. Every restored start
+appends the settings filename and restoration timestamp to its provenance.
 
 A successful or collected run is never treated as scientifically approved
 unless the authoritative QC table marks it approved. Folder names and TOML
@@ -140,13 +160,17 @@ rows additionally contain a `RAW_IDTRACKER_INPUT` warning.
 `total_distance_px_in_analysis_window` is the sum of valid adjacent-frame
 Euclidean steps from the inclusive start through the inclusive end. Missing
 segments are excluded without additional interpolation or gap bridging. The
-editable jump threshold defaults to 50 pixels. When an adjacent finite step is
-strictly greater, the processor searches up to 120 frames for a return near the
-pre-jump position. Coordinates in a returning excursion are excluded from every
-calculation. If there is no return, the remainder is conservatively excluded
-and flagged for start review. Raw coordinates are preserved, never
-interpolated, and the CSV reports the threshold, excluded-coordinate count, and
-QC status for every animal.
+editable, provisional jump threshold defaults to the researcher-selected value
+of 200 pixels. When an adjacent finite step is strictly greater, that movement
+step is excluded from latency chains and every distance total. Neither endpoint
+coordinate is deleted: both remain eligible for frame-based wall and fungus
+counts. Later valid movement steps resume as a new path segment, and no missing
+gap or rejected jump is bridged. Raw coordinates are preserved and never
+interpolated. The CSV reports `one_frame_jump_threshold_px`,
+`one_frame_jumps_excluded`, and `jump_qc_status` for every animal.
+`jump_threshold_px` remains as a compatibility alias. The deprecated
+`jump_artifact_coordinate_frames_excluded` is zero because this version does
+not delete coordinate frames.
 
 The Jump Audit evaluates all approved BA and fight sessions with usable
 positive start evidence in one
@@ -176,7 +200,21 @@ crossing is accepted only while it is connected to that entry coordinate by a
 continuous chain of valid adjacent steps at or below the anti-jump threshold.
 This prevents a large IDtracker relocation from becoming a false wake event.
 PDF track lines break across original missing coordinates and excluded
-jump-artifact coordinates; subtle gray x marks show the excluded raw positions.
+jump steps; subtle gray x marks show the destination endpoint after each
+rejected step, but that coordinate itself is retained.
+
+Post-wake outputs begin at `threshold_crossing_global_frame` and continue
+through the inclusive analysis end. The wake frame is included in frame counts;
+movement opportunities begin with the step from the wake frame to the next
+frame. The primary adjusted movement measure is
+`post_wake_total_distance_px / post_wake_valid_movement_steps`. A valid
+movement step has finite effective coordinates at both adjacent frames and is
+not greater than the 200-pixel jump threshold. Missing gaps and rejected jumps
+are never bridged. Wall, fungus, and joint open-and-off-fungus distance
+summaries use the same accepted steps and the same segment-midpoint geometry as
+the full-window metrics. BA fungus and joint fields are blank with an explicit
+`NOT_APPLICABLE_NOT_FIGHT` status. If wake is not reached or the exact baseline
+is invalid, post-wake numeric fields are blank rather than zero.
 
 Wall-buffer outputs use primary `roi_list[0]` and a GUI-configurable inward
 buffer (default 30 pixels). Frame classifications use centroids; distance

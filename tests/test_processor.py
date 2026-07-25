@@ -11,6 +11,7 @@ import numpy as np
 
 from processor import (
     IDTRACKER_TRAJECTORY_SOURCES,
+    OUTPUT_COLUMNS,
     SCRIPT_VERSION,
     analyze,
     continuous_path_segments,
@@ -23,6 +24,7 @@ from processor import (
 )
 from jump_audit import audit_manifest
 from firebird_gui import (
+    App,
     BATCH_SESSION_RESOLVER,
     COMBINE_RESULTS,
     TRAJECTORY_NAMES,
@@ -36,11 +38,168 @@ from firebird_gui import (
     normalized_video_name,
     jump_audit_start_for_record,
     parse_video_fields,
+    saved_start_decisions,
+    settings_bundle_from_combined_rows,
+    settings_bundle_from_jump_audit_rows,
+    validate_settings_bundle,
     validate_start_report_updates,
 )
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_reusable_settings_validate_and_preserve_start_provenance(self):
+        records = [
+            {
+                "qc_record_id": "QC_1",
+                "video": "Camera_1_12345678_20260724_1200_ACT1.mp4",
+                "cell_label": "A1",
+                "analysis": "ba",
+                "start": "1150",
+                "archived_original_start": "1095",
+                "status": "START APPROVED FROM JUMP AUDIT",
+                "start_decision_source": "JUMP_AUDIT_APPROVED",
+                "start_decision_provenance": "approved audit evidence",
+            }
+        ]
+        decisions = saved_start_decisions(records)
+        bundle = validate_settings_bundle(
+            {
+                "format": "IDTRACKER_POSTPROCESSING_SETTINGS",
+                "schema_version": 1,
+                "gui_settings": {
+                    "window_frames": "7200",
+                    "one_frame_jump": "200",
+                    "use_social_disappearance": True,
+                },
+                "start_decisions": decisions,
+                "jump_audit": {"summaries": [], "tracks": []},
+            }
+        )
+        self.assertEqual(
+            bundle["start_decisions"][0]["start_global_frame"], 1150
+        )
+        self.assertEqual(
+            bundle["start_decisions"][0]["decision_source"],
+            "JUMP_AUDIT_APPROVED",
+        )
+
+    def test_prior_combined_csv_restores_parameters_and_deduplicates_animals(self):
+        common = {
+            "qc_record_id": "QC_FIGHT",
+            "video": "Camera_1_12345678_20260724_1200_FIGHT_ACT1.mp4",
+            "cell_label": "A1",
+            "analysis_type": "fight",
+            "analysis_start_frame": "1150",
+            "analysis_timespan_frames": "7200",
+            "movement_threshold_px": "30",
+            "wall_buffer_px": "30",
+            "fungus_buffer_px": "30",
+            "social_distance_threshold_px": "60",
+            "jump_threshold_px": "200",
+            "use_social_disappearance_in_calculations": "YES",
+            "script_version": "0.5.5",
+            "archived_original_start_frame": "1095",
+            "start_frame_decision_source": "JUMP_AUDIT_APPROVED",
+            "start_frame_decision_provenance": "approved audit evidence",
+        }
+        rows = [
+            {**common, "idtracker_animal_id": "0"},
+            {**common, "idtracker_animal_id": "1"},
+        ]
+        bundle = settings_bundle_from_combined_rows(rows, "prior.csv")
+        self.assertEqual(bundle["gui_settings"]["one_frame_jump"], "200")
+        self.assertTrue(
+            bundle["gui_settings"]["use_social_disappearance"]
+        )
+        self.assertEqual(len(bundle["start_decisions"]), 1)
+        self.assertEqual(
+            bundle["start_decisions"][0]["start_global_frame"], 1150
+        )
+
+    def test_prior_jump_audit_restores_approved_video_decision(self):
+        summaries = [
+            {
+                "video": "Camera_1_12345678_20260724_1200_ACT1.mp4",
+                "analysis_type": "ba",
+                "suggested_start_global_frame": "1150",
+                "suggested_full_window_fits": "True",
+                "last_synchronized_disturbance_frame": "1109",
+                "jump_threshold_px": "200.0",
+                "audit_version": "1.0",
+                "decision": "APPROVED",
+            }
+        ]
+        bundle = settings_bundle_from_jump_audit_rows(
+            summaries, source_name="jump_audit_videos.csv"
+        )
+        self.assertEqual(
+            bundle["jump_audit"]["summaries"][0][
+                "suggested_start_global_frame"
+            ],
+            1150,
+        )
+        self.assertEqual(
+            bundle["start_decisions"][0]["scope"], "VIDEO"
+        )
+        self.assertEqual(
+            bundle["start_decisions"][0]["start_global_frame"], 1150
+        )
+
+    def test_saved_video_decision_applies_atomically_to_current_scan(self):
+        app = App.__new__(App)
+        app.all_records = [
+            {
+                "qc_record_id": "NEW_A1",
+                "video": "Camera_1_12345678_20260724_1200_ACT1.mp4",
+                "cell_label": "A1",
+                "analysis": "ba",
+                "start": "1095",
+                "archived_original_start": "1095",
+            },
+            {
+                "qc_record_id": "NEW_A2",
+                "video": "Camera_1_12345678_20260724_1200_ACT1.mp4",
+                "cell_label": "A2",
+                "analysis": "ba",
+                "start": "1095",
+                "archived_original_start": "1095",
+            },
+        ]
+        decision = {
+            "scope": "VIDEO",
+            "qc_record_id": "",
+            "video": "Camera_1_12345678_20260724_1200_ACT1.mp4",
+            "cell_label": "",
+            "analysis": "ba",
+            "start_global_frame": 1150,
+            "archived_original_start_frame": "",
+            "status": "START APPROVED FROM JUMP AUDIT",
+            "decision_source": "JUMP_AUDIT_APPROVED",
+            "decision_provenance": "approved audit evidence",
+        }
+        restored, unmatched = app._apply_loaded_start_decisions(
+            [decision], "/tmp/previous_settings.json"
+        )
+        self.assertEqual(restored, 2)
+        self.assertEqual(unmatched, [])
+        self.assertEqual(
+            {record["start"] for record in app.all_records}, {"1150"}
+        )
+        self.assertEqual(
+            {
+                record["archived_original_start"]
+                for record in app.all_records
+            },
+            {"1095"},
+        )
+        self.assertTrue(
+            all(
+                "previous_settings.json"
+                in record["start_decision_provenance"]
+                for record in app.all_records
+            )
+        )
+
     def test_jump_audit_can_use_detected_start_without_approving_it(self):
         choice = jump_audit_start_for_record(
             {"start": "", "detected": "1538"}
@@ -267,7 +426,7 @@ class ProcessorTests(unittest.TestCase):
                 row["trajectory_source_kind"], "IDTRACKER_WITHOUT_GAPS"
             )
 
-    def test_one_frame_jump_over_50_is_excluded_and_breaks_latency_chain(self):
+    def test_jump_rejects_only_impossible_step_and_resumes_new_segment(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             trajectory = root / "without_gaps.npy"
@@ -284,26 +443,52 @@ class ProcessorTests(unittest.TestCase):
             )[0]
             self.assertEqual(
                 row["total_distance_px_in_analysis_window"],
-                20.0,
+                40.0,
             )
+            self.assertEqual(row["one_frame_jump_threshold_px"], 50)
+            self.assertEqual(row["one_frame_jumps_excluded"], 1)
             self.assertEqual(row["jump_threshold_px"], 50)
             self.assertEqual(
-                row["jump_artifact_coordinate_frames_excluded"], 3
+                row["jump_artifact_coordinate_frames_excluded"], 0
             )
             self.assertEqual(
                 row["jump_qc_status"],
-                "PERSISTENT_JUMP_REMAINDER_EXCLUDED_REVIEW_START",
+                "ONE_FRAME_JUMP_STEPS_EXCLUDED",
             )
             self.assertEqual(row["threshold_crossing_global_frame"], "")
             self.assertEqual(row["latency_to_threshold_frames"], "")
             self.assertEqual(row["result_status"], "THRESHOLD_NOT_REACHED")
-            self.assertIn("ANTI_JUMP_COORDINATE_QC", row["warning"])
+            self.assertIn("ANTI_JUMP_STEP_QC", row["warning"])
             segments = continuous_path_segments(
                 arr[10:16, 0, :], maximum_step_px=50
             )
             self.assertEqual(
                 [offsets.tolist() for offsets, _xy in segments],
                 [[0, 1, 2], [3, 4, 5]],
+            )
+
+    def test_default_jump_threshold_retains_steps_equal_to_200_pixels(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((30, 1, 2), dtype=float)
+            arr[10:13, 0, 0] = [0, 200, 400]
+            np.save(trajectory, arr)
+            row = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=2,
+                threshold=30,
+            )[0]
+            self.assertEqual(row["jump_threshold_px"], 200)
+            self.assertEqual(row["one_frame_jump_threshold_px"], 200)
+            self.assertEqual(row["one_frame_jumps_excluded"], 0)
+            self.assertEqual(
+                row["jump_artifact_coordinate_frames_excluded"], 0
+            )
+            self.assertEqual(
+                row["total_distance_px_in_analysis_window"], 400.0
             )
 
     def test_one_frame_step_equal_to_50_is_retained(self):
@@ -330,7 +515,7 @@ class ProcessorTests(unittest.TestCase):
             )
             self.assertEqual(row["threshold_crossing_global_frame"], 11)
 
-    def test_returning_jump_excludes_coordinates_not_only_step(self):
+    def test_returning_excursion_rejects_two_steps_but_keeps_coordinates(self):
         xy = np.asarray(
             [[0, 0], [10, 0], [200, 0], [201, 0], [11, 0], [12, 0]],
             dtype=float,
@@ -340,12 +525,16 @@ class ProcessorTests(unittest.TestCase):
         )
         self.assertEqual(
             np.flatnonzero(result["excluded_mask"]).tolist(),
-            [2, 3],
+            [],
         )
-        self.assertTrue(np.isnan(result["cleaned_xy"][2:4]).all())
+        np.testing.assert_array_equal(result["cleaned_xy"], xy)
+        self.assertEqual(
+            np.flatnonzero(result["rejected_step_mask"]).tolist(),
+            [1, 3],
+        )
         self.assertEqual(
             result["status"],
-            "RETURNING_JUMP_ARTIFACT_COORDINATES_EXCLUDED",
+            "ONE_FRAME_JUMP_STEPS_EXCLUDED",
         )
         self.assertEqual(result["persistent_events"], 0)
 
@@ -483,6 +672,131 @@ class ProcessorTests(unittest.TestCase):
                 "NOT_APPLICABLE_NOT_FIGHT",
             )
 
+    def test_ba_post_wake_metrics_use_valid_steps_and_wall_midpoints(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "session.json").write_text(
+                json.dumps(
+                    {
+                        "roi_list": [
+                            "+ Polygon [[0, 0], [100, 0], [100, 100], [0, 100]]"
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((30, 1, 2), dtype=float)
+            arr[10:16, 0, :] = [
+                [5, 50], [15, 50], [35, 50],
+                [45, 50], [95, 50], [85, 50],
+            ]
+            np.save(trajectory, arr)
+            row = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=5,
+                threshold=30,
+                wall_buffer_px=10,
+                analysis_type="ba",
+            )[0]
+            self.assertEqual(row["threshold_crossing_global_frame"], 12)
+            self.assertEqual(row["post_wake_analysis_status"], "CALCULATED")
+            self.assertEqual(row["post_wake_valid_coordinate_frames"], 4)
+            self.assertEqual(row["post_wake_valid_movement_steps"], 3)
+            self.assertEqual(row["post_wake_missing_coordinate_frames"], 0)
+            self.assertEqual(row["post_wake_jump_excluded_steps"], 0)
+            self.assertAlmostEqual(row["post_wake_total_distance_px"], 70)
+            self.assertAlmostEqual(
+                row["post_wake_distance_px_per_valid_step"], 70 / 3
+            )
+            self.assertEqual(row["post_wake_frames_inside_wall_buffer"], 1)
+            self.assertEqual(row["post_wake_frames_outside_wall_buffer"], 3)
+            self.assertEqual(row["post_wake_steps_inside_wall_buffer"], 1)
+            self.assertEqual(row["post_wake_steps_outside_wall_buffer"], 2)
+            self.assertAlmostEqual(
+                row["post_wake_distance_px_inside_wall_buffer"], 10
+            )
+            self.assertAlmostEqual(
+                row["post_wake_distance_px_outside_wall_buffer"], 60
+            )
+            self.assertAlmostEqual(row["post_wake_open_area_proportion"], 0.75)
+            self.assertAlmostEqual(
+                row["post_wake_open_distance_px_per_available_step"], 20
+            )
+            self.assertAlmostEqual(
+                row["post_wake_speed_px_per_open_step"], 30
+            )
+            self.assertEqual(row["post_wake_wall_analysis_status"], "PASS")
+            self.assertEqual(row["post_wake_frames_on_fungus"], "")
+            self.assertEqual(
+                row["post_wake_fungus_analysis_status"],
+                "NOT_APPLICABLE_NOT_FIGHT",
+            )
+            self.assertEqual(
+                row["post_wake_open_off_fungus_analysis_status"],
+                "NOT_APPLICABLE_NOT_FIGHT",
+            )
+
+    def test_post_wake_missing_and_jump_steps_are_not_bridged(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((30, 1, 2), dtype=float)
+            arr[10:17, 0, :] = [
+                [0, 0], [31, 0], [32, 0], [np.nan, np.nan],
+                [33, 0], [300, 0], [301, 0],
+            ]
+            np.save(trajectory, arr)
+            row = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=6,
+                threshold=30,
+                one_frame_jump_threshold_px=200,
+            )[0]
+            self.assertEqual(row["threshold_crossing_global_frame"], 11)
+            self.assertEqual(row["one_frame_jumps_excluded"], 1)
+            self.assertEqual(row["post_wake_valid_coordinate_frames"], 5)
+            self.assertEqual(row["post_wake_missing_coordinate_frames"], 1)
+            self.assertEqual(row["post_wake_valid_movement_steps"], 2)
+            self.assertEqual(row["post_wake_jump_excluded_steps"], 1)
+            self.assertAlmostEqual(row["post_wake_total_distance_px"], 2)
+            self.assertAlmostEqual(
+                row["post_wake_distance_px_per_valid_step"], 1
+            )
+
+    def test_post_wake_metrics_are_blank_without_a_wake_frame(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((30, 1, 2), dtype=float)
+            arr[10:16, 0, 0] = np.arange(6)
+            np.save(trajectory, arr)
+            no_crossing = analyze(
+                trajectory, root, 10, 5, threshold=30
+            )[0]
+            self.assertEqual(
+                no_crossing["post_wake_analysis_status"],
+                "NOT_CALCULATED_THRESHOLD_NOT_REACHED",
+            )
+            self.assertEqual(no_crossing["post_wake_total_distance_px"], "")
+
+            arr[10, 0, :] = np.nan
+            np.save(trajectory, arr)
+            invalid_baseline = analyze(
+                trajectory, root, 10, 5, threshold=30
+            )[0]
+            self.assertEqual(
+                invalid_baseline["post_wake_analysis_status"],
+                "NOT_CALCULATED_INVALID_BASELINE",
+            )
+            self.assertEqual(
+                invalid_baseline["post_wake_valid_movement_steps"], ""
+            )
+
     def test_fight_side_and_fungus_partitions(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
@@ -547,6 +861,82 @@ class ProcessorTests(unittest.TestCase):
             self.assertEqual(animal0["social_disappearance_frames"], 0)
             self.assertEqual(
                 animal0["social_return_interaction_events"], 0
+            )
+
+    def test_fight_post_wake_fungus_and_joint_masks_are_direct_partitions(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            (root / "session.json").write_text(
+                json.dumps(
+                    {
+                        "roi_list": [
+                            "+ Polygon [[0, 0], [100, 0], [100, 100], [0, 100]]",
+                            "+ Polygon [[40, 40], [60, 40], [60, 60], [40, 60]]",
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            trajectory = root / "without_gaps.npy"
+            arr = np.zeros((30, 2, 2), dtype=float)
+            arr[10:17, 0, :] = [
+                [5, 50], [20, 50], [35, 50], [45, 50],
+                [55, 50], [65, 50], [95, 50],
+            ]
+            arr[10:17, 1, :] = [90, 20]
+            np.save(trajectory, arr)
+            animal0 = analyze(
+                trajectory,
+                root,
+                start=10,
+                window=6,
+                threshold=30,
+                wall_buffer_px=10,
+                analysis_type="fight",
+            )[0]
+            self.assertEqual(animal0["post_wake_analysis_status"], "CALCULATED")
+            self.assertEqual(animal0["post_wake_valid_coordinate_frames"], 5)
+            self.assertEqual(animal0["post_wake_valid_movement_steps"], 4)
+            self.assertAlmostEqual(animal0["post_wake_total_distance_px"], 60)
+            self.assertEqual(animal0["post_wake_frames_on_fungus"], 2)
+            self.assertEqual(animal0["post_wake_frames_off_fungus"], 3)
+            self.assertEqual(animal0["post_wake_steps_on_fungus"], 3)
+            self.assertEqual(animal0["post_wake_steps_off_fungus"], 1)
+            self.assertAlmostEqual(
+                animal0["post_wake_distance_px_on_fungus"], 30
+            )
+            self.assertAlmostEqual(
+                animal0["post_wake_distance_px_off_fungus"], 30
+            )
+            self.assertEqual(
+                animal0["post_wake_frames_open_and_off_fungus"], 2
+            )
+            self.assertEqual(
+                animal0["post_wake_steps_open_and_off_fungus"], 1
+            )
+            self.assertAlmostEqual(
+                animal0["post_wake_distance_px_open_and_off_fungus"], 30
+            )
+            self.assertAlmostEqual(
+                animal0["post_wake_open_off_fungus_proportion"], 0.4
+            )
+            self.assertAlmostEqual(
+                animal0[
+                    "post_wake_open_off_fungus_distance_px_per_available_step"
+                ],
+                7.5,
+            )
+            self.assertAlmostEqual(
+                animal0[
+                    "post_wake_speed_px_per_open_off_fungus_step"
+                ],
+                30,
+            )
+            self.assertEqual(
+                animal0["post_wake_fungus_analysis_status"], "PASS"
+            )
+            self.assertEqual(
+                animal0["post_wake_open_off_fungus_analysis_status"], "PASS"
             )
 
     def test_fight_start_side_is_unassigned_when_start_coordinate_missing(self):
@@ -854,6 +1244,7 @@ class ProcessorTests(unittest.TestCase):
             np.save(trajectory, np.zeros((30, 1, 2), dtype=float))
             row = analyze(trajectory, root, 10, 5, 30)[0]
             self.assertEqual(row["script_version"], SCRIPT_VERSION)
+            self.assertEqual(set(row), set(OUTPUT_COLUMNS))
 
     def test_final_start_is_simple_and_original_start_is_archived(self):
         with tempfile.TemporaryDirectory() as folder:

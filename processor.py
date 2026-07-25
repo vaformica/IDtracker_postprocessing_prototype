@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCRIPT_VERSION = "0.5.4"
+SCRIPT_VERSION = "0.6.0"
 
 IDTRACKER_TRAJECTORY_SOURCES = {
     "validated.npy": "IDTRACKER_VALIDATED",
@@ -42,9 +42,45 @@ OUTPUT_COLUMNS = [
     "threshold_crossing_global_frame",
     "latency_to_threshold_frames",
     "total_distance_px_in_analysis_window",
+    "one_frame_jump_threshold_px",
+    "one_frame_jumps_excluded",
     "jump_threshold_px",
     "jump_artifact_coordinate_frames_excluded",
     "jump_qc_status",
+    "post_wake_analysis_status",
+    "post_wake_wall_analysis_status",
+    "post_wake_fungus_analysis_status",
+    "post_wake_open_off_fungus_analysis_status",
+    "post_wake_valid_coordinate_frames",
+    "post_wake_valid_movement_steps",
+    "post_wake_missing_coordinate_frames",
+    "post_wake_jump_excluded_steps",
+    "post_wake_total_distance_px",
+    "post_wake_distance_px_per_valid_step",
+    "post_wake_frames_inside_wall_buffer",
+    "post_wake_frames_outside_wall_buffer",
+    "post_wake_open_area_proportion",
+    "post_wake_distance_px_inside_wall_buffer",
+    "post_wake_distance_px_outside_wall_buffer",
+    "post_wake_steps_inside_wall_buffer",
+    "post_wake_steps_outside_wall_buffer",
+    "post_wake_open_distance_px_per_available_step",
+    "post_wake_speed_px_per_open_step",
+    "post_wake_frames_on_fungus",
+    "post_wake_frames_off_fungus",
+    "post_wake_distance_px_on_fungus",
+    "post_wake_distance_px_off_fungus",
+    "post_wake_steps_on_fungus",
+    "post_wake_steps_off_fungus",
+    "post_wake_off_fungus_proportion",
+    "post_wake_off_fungus_distance_px_per_available_step",
+    "post_wake_speed_px_per_off_fungus_step",
+    "post_wake_frames_open_and_off_fungus",
+    "post_wake_distance_px_open_and_off_fungus",
+    "post_wake_steps_open_and_off_fungus",
+    "post_wake_open_off_fungus_proportion",
+    "post_wake_open_off_fungus_distance_px_per_available_step",
+    "post_wake_speed_px_per_open_off_fungus_step",
     "wall_buffer_px",
     "frames_inside_wall_buffer",
     "frames_outside_wall_buffer",
@@ -391,22 +427,17 @@ def compute_social_candidates(
 
 def filter_jump_artifact_coordinates(
     xy: np.ndarray,
-    threshold_px: float = 50.0,
+    threshold_px: float = 200.0,
     return_horizon_frames: int = 120,
 ) -> dict:
-    """Exclude impossible out-and-return coordinates without interpolation.
+    """Identify rejected adjacent movement steps without deleting coordinates.
 
-    A jump begins only when two adjacent, finite coordinates are separated by
-    more than ``threshold_px``. If the trajectory returns within
-    ``threshold_px`` of the pre-jump coordinate within the review horizon, all
-    coordinates from the jump destination through the frame before that return
-    are excluded. If no return is found, the remainder of the analysis window
-    is excluded and the event is flagged as persistent. This conservative
-    behavior prevents a relocated tracking artifact from contaminating any
-    distance or spatial calculation.
-
-    The input array is never changed. Exclusion is represented as NaN in a
-    cleaned copy, and every event remains auditable.
+    A one-frame jump is a finite adjacent step strictly greater than
+    ``threshold_px``. That step is excluded from distance, latency chains, and
+    plotted paths. Both endpoint coordinates remain available for per-frame
+    wall/fungus location counts. The deprecated ``return_horizon_frames``
+    argument is retained only for call compatibility; the separate Jump Audit
+    still performs its documented return/persistence classification.
     """
     xy = np.asarray(xy, dtype=float)
     if xy.ndim != 2 or xy.shape[1] != 2:
@@ -418,69 +449,32 @@ def filter_jump_artifact_coordinates(
 
     valid = np.isfinite(xy).all(axis=1)
     step_distance = np.linalg.norm(np.diff(xy, axis=0), axis=1)
-    jump_edges = np.flatnonzero(
+    rejected_step_mask = (
         valid[:-1] & valid[1:] & (step_distance > threshold_px)
     )
+    jump_edges = np.flatnonzero(rejected_step_mask)
     excluded = np.zeros(len(xy), dtype=bool)
-    events = []
-    persistent_events = 0
-
-    for edge in jump_edges:
-        # This edge is already inside a previously classified excursion.
-        if excluded[edge]:
-            continue
-        pre_jump = xy[edge]
-        search_stop = min(
-            len(xy), edge + 2 + int(return_horizon_frames)
-        )
-        return_frame = None
-        for candidate in range(edge + 2, search_stop):
-            if (
-                valid[candidate]
-                and np.linalg.norm(xy[candidate] - pre_jump)
-                <= threshold_px
-            ):
-                return_frame = candidate
-                break
-
-        if return_frame is None:
-            excluded[edge + 1 :] = True
-            persistent_events += 1
-            event_end = len(xy) - 1
-            event_status = "PERSISTENT_NO_RETURN_WITHIN_HORIZON"
-        else:
-            excluded[edge + 1 : return_frame] = True
-            event_end = return_frame - 1
-            event_status = "RETURNED_TO_PRE_JUMP_LOCATION"
-        events.append(
-            {
-                "jump_edge_offset": int(edge),
-                "jump_destination_offset": int(edge + 1),
-                "excluded_start_offset": int(edge + 1),
-                "excluded_end_offset": int(event_end),
-                "return_offset": (
-                    int(return_frame) if return_frame is not None else None
-                ),
-                "step_px": float(step_distance[edge]),
-                "status": event_status,
-            }
-        )
-        if return_frame is None:
-            break
-
-    cleaned = xy.copy()
-    cleaned[excluded] = np.nan
-    if persistent_events:
-        status = "PERSISTENT_JUMP_REMAINDER_EXCLUDED_REVIEW_START"
-    elif events:
-        status = "RETURNING_JUMP_ARTIFACT_COORDINATES_EXCLUDED"
-    else:
-        status = "PASS_NO_JUMPS_OVER_THRESHOLD"
+    events = [
+        {
+            "jump_edge_offset": int(edge),
+            "jump_destination_offset": int(edge + 1),
+            "step_px": float(step_distance[edge]),
+            "status": "ONE_FRAME_STEP_EXCLUDED",
+        }
+        for edge in jump_edges
+    ]
+    status = (
+        "ONE_FRAME_JUMP_STEPS_EXCLUDED"
+        if events
+        else "PASS_NO_JUMPS_OVER_THRESHOLD"
+    )
     return {
-        "cleaned_xy": cleaned,
+        "cleaned_xy": xy.copy(),
         "excluded_mask": excluded,
+        "rejected_step_mask": rejected_step_mask,
+        "step_distance_px": step_distance,
         "events": events,
-        "persistent_events": persistent_events,
+        "persistent_events": 0,
         "status": status,
     }
 
@@ -563,6 +557,358 @@ def continuous_path_segments(
             segments.append((offsets, xy[offsets]))
             run_start = None
     return segments
+
+
+POST_WAKE_NUMERIC_COLUMNS = (
+    "post_wake_valid_coordinate_frames",
+    "post_wake_valid_movement_steps",
+    "post_wake_missing_coordinate_frames",
+    "post_wake_jump_excluded_steps",
+    "post_wake_total_distance_px",
+    "post_wake_distance_px_per_valid_step",
+    "post_wake_frames_inside_wall_buffer",
+    "post_wake_frames_outside_wall_buffer",
+    "post_wake_open_area_proportion",
+    "post_wake_distance_px_inside_wall_buffer",
+    "post_wake_distance_px_outside_wall_buffer",
+    "post_wake_steps_inside_wall_buffer",
+    "post_wake_steps_outside_wall_buffer",
+    "post_wake_open_distance_px_per_available_step",
+    "post_wake_speed_px_per_open_step",
+    "post_wake_frames_on_fungus",
+    "post_wake_frames_off_fungus",
+    "post_wake_distance_px_on_fungus",
+    "post_wake_distance_px_off_fungus",
+    "post_wake_steps_on_fungus",
+    "post_wake_steps_off_fungus",
+    "post_wake_off_fungus_proportion",
+    "post_wake_off_fungus_distance_px_per_available_step",
+    "post_wake_speed_px_per_off_fungus_step",
+    "post_wake_frames_open_and_off_fungus",
+    "post_wake_distance_px_open_and_off_fungus",
+    "post_wake_steps_open_and_off_fungus",
+    "post_wake_open_off_fungus_proportion",
+    "post_wake_open_off_fungus_distance_px_per_available_step",
+    "post_wake_speed_px_per_open_off_fungus_step",
+)
+
+
+def blank_post_wake_metrics(status: str, is_fight: bool) -> dict:
+    """Return explicit missing post-wake outputs for an unavailable wake frame."""
+    output = {column: "" for column in POST_WAKE_NUMERIC_COLUMNS}
+    output.update(
+        {
+            "post_wake_analysis_status": status,
+            "post_wake_wall_analysis_status": (
+                "NOT_CALCULATED_NO_WAKE_FRAME"
+            ),
+            "post_wake_fungus_analysis_status": (
+                "NOT_CALCULATED_NO_WAKE_FRAME"
+                if is_fight
+                else "NOT_APPLICABLE_NOT_FIGHT"
+            ),
+            "post_wake_open_off_fungus_analysis_status": (
+                "NOT_CALCULATED_NO_WAKE_FRAME"
+                if is_fight
+                else "NOT_APPLICABLE_NOT_FIGHT"
+            ),
+        }
+    )
+    return output
+
+
+def compute_post_wake_metrics(
+    *,
+    effective_xy: np.ndarray,
+    raw_xy: np.ndarray,
+    wake_offset: int,
+    step_distances: np.ndarray,
+    accepted_steps: np.ndarray,
+    rejected_jump_steps: np.ndarray,
+    primary_roi: np.ndarray | None,
+    secondary_roi: np.ndarray | None,
+    wall_buffer_px: float,
+    is_fight: bool,
+) -> dict:
+    """Calculate wake-through-inclusive-end metrics with valid-step denominators.
+
+    ``wake_offset`` is the already-established latency offset. Movement steps
+    begin at that frame and end at the next frame. Missing and rejected jump
+    steps are never bridged. Jump QC changes step eligibility only; it does not
+    remove either endpoint from per-frame location counts.
+    """
+    effective_xy = np.asarray(effective_xy, dtype=float)
+    raw_xy = np.asarray(raw_xy, dtype=float)
+    frame_count = len(effective_xy)
+    if not 0 <= wake_offset < frame_count:
+        raise ValueError("wake_offset is outside the analysis window")
+    valid = np.isfinite(effective_xy).all(axis=1)
+    raw_valid = np.isfinite(raw_xy).all(axis=1)
+    post_frames = np.arange(frame_count) >= wake_offset
+    post_steps = np.arange(max(frame_count - 1, 0)) >= wake_offset
+    post_accepted = accepted_steps & post_steps
+    post_rejected = rejected_jump_steps & post_steps
+    valid_frames = int((valid & post_frames).sum())
+    valid_step_count = int(post_accepted.sum())
+    missing_frames = int((~raw_valid & post_frames).sum())
+    jump_step_count = int(post_rejected.sum())
+
+    output = {column: "" for column in POST_WAKE_NUMERIC_COLUMNS}
+    output.update(
+        {
+            "post_wake_analysis_status": (
+                "CALCULATED"
+                if valid_step_count
+                else "NOT_CALCULATED_NO_VALID_MOVEMENT_STEPS"
+            ),
+            "post_wake_wall_analysis_status": "NOT_CALCULATED",
+            "post_wake_fungus_analysis_status": (
+                "NOT_CALCULATED"
+                if is_fight
+                else "NOT_APPLICABLE_NOT_FIGHT"
+            ),
+            "post_wake_open_off_fungus_analysis_status": (
+                "NOT_CALCULATED"
+                if is_fight
+                else "NOT_APPLICABLE_NOT_FIGHT"
+            ),
+            "post_wake_valid_coordinate_frames": valid_frames,
+            "post_wake_valid_movement_steps": valid_step_count,
+            "post_wake_missing_coordinate_frames": missing_frames,
+            "post_wake_jump_excluded_steps": jump_step_count,
+        }
+    )
+    total_distance = ""
+    if valid_step_count:
+        total_distance = float(step_distances[post_accepted].sum())
+        output["post_wake_total_distance_px"] = total_distance
+        output["post_wake_distance_px_per_valid_step"] = (
+            total_distance / valid_step_count
+        )
+
+    inside_primary = np.zeros(frame_count, dtype=bool)
+    distance_to_wall = np.full(frame_count, np.nan)
+    midpoint_in_primary = np.zeros(frame_count - 1, dtype=bool)
+    midpoint_distance_to_wall = np.full(frame_count - 1, np.nan)
+    in_wall = np.zeros(frame_count, dtype=bool)
+    open_area = np.zeros(frame_count, dtype=bool)
+    steps_in_wall = np.zeros(frame_count - 1, dtype=bool)
+    steps_open = np.zeros(frame_count - 1, dtype=bool)
+    wall_pass = False
+    if primary_roi is None:
+        output["post_wake_wall_analysis_status"] = (
+            "NOT_CALCULATED_NO_PRIMARY_ROI"
+        )
+    else:
+        if valid.any():
+            inside_primary[valid] = points_inside_polygon(
+                effective_xy[valid], primary_roi
+            )
+            distance_to_wall[valid] = distance_to_polygon_boundary(
+                effective_xy[valid], primary_roi
+            )
+        in_wall = (
+            valid
+            & inside_primary
+            & (distance_to_wall <= wall_buffer_px)
+            & post_frames
+        )
+        open_area = (
+            valid
+            & inside_primary
+            & (distance_to_wall > wall_buffer_px)
+            & post_frames
+        )
+        if post_accepted.any():
+            midpoints = (effective_xy[:-1] + effective_xy[1:]) / 2.0
+            midpoint_in_primary[post_accepted] = points_inside_polygon(
+                midpoints[post_accepted], primary_roi
+            )
+            midpoint_distance_to_wall[post_accepted] = (
+                distance_to_polygon_boundary(
+                    midpoints[post_accepted], primary_roi
+                )
+            )
+        steps_in_wall = (
+            post_accepted
+            & midpoint_in_primary
+            & (midpoint_distance_to_wall <= wall_buffer_px)
+        )
+        steps_open = (
+            post_accepted
+            & midpoint_in_primary
+            & (midpoint_distance_to_wall > wall_buffer_px)
+        )
+        frames_in = int(in_wall.sum())
+        frames_out = int(open_area.sum())
+        count_steps_in = int(steps_in_wall.sum())
+        count_steps_out = int(steps_open.sum())
+        output["post_wake_frames_inside_wall_buffer"] = frames_in
+        output["post_wake_frames_outside_wall_buffer"] = frames_out
+        output["post_wake_steps_inside_wall_buffer"] = count_steps_in
+        output["post_wake_steps_outside_wall_buffer"] = count_steps_out
+        distance_in = ""
+        distance_out = ""
+        if valid_step_count:
+            distance_in = float(step_distances[steps_in_wall].sum())
+            distance_out = float(step_distances[steps_open].sum())
+            output["post_wake_distance_px_inside_wall_buffer"] = distance_in
+            output["post_wake_distance_px_outside_wall_buffer"] = distance_out
+        frames_outside_roi = int(
+            (valid & post_frames & ~inside_primary).sum()
+        )
+        steps_outside_roi = int(
+            (post_accepted & ~midpoint_in_primary).sum()
+        )
+        wall_pass = (
+            frames_outside_roi == 0
+            and steps_outside_roi == 0
+            and frames_in + frames_out == valid_frames
+            and count_steps_in + count_steps_out == valid_step_count
+            and (
+                not valid_step_count
+                or math.isclose(
+                    float(distance_in) + float(distance_out),
+                    float(total_distance),
+                    rel_tol=1e-10,
+                    abs_tol=1e-8,
+                )
+            )
+        )
+        output["post_wake_wall_analysis_status"] = (
+            "PASS" if wall_pass else "FAIL_OUTSIDE_PRIMARY_ROI"
+        )
+        if wall_pass:
+            if valid_frames:
+                output["post_wake_open_area_proportion"] = (
+                    frames_out / valid_frames
+                )
+            if valid_step_count:
+                output[
+                    "post_wake_open_distance_px_per_available_step"
+                ] = float(distance_out) / valid_step_count
+                if count_steps_out:
+                    output["post_wake_speed_px_per_open_step"] = (
+                        float(distance_out) / count_steps_out
+                    )
+            assert frames_in + frames_out == valid_frames
+            assert count_steps_in + count_steps_out == valid_step_count
+
+    on_fungus = np.zeros(frame_count, dtype=bool)
+    off_fungus = np.zeros(frame_count, dtype=bool)
+    steps_on_fungus = np.zeros(frame_count - 1, dtype=bool)
+    steps_off_fungus = np.zeros(frame_count - 1, dtype=bool)
+    fungus_pass = False
+    if is_fight:
+        if secondary_roi is None:
+            output["post_wake_fungus_analysis_status"] = (
+                "NOT_CALCULATED_NO_SECONDARY_ROI"
+            )
+        else:
+            if valid.any():
+                on_fungus[valid] = points_inside_polygon(
+                    effective_xy[valid], secondary_roi
+                )
+            on_fungus &= post_frames
+            off_fungus = valid & post_frames & ~on_fungus
+            midpoint_on_fungus = np.zeros(frame_count - 1, dtype=bool)
+            if post_accepted.any():
+                midpoints = (effective_xy[:-1] + effective_xy[1:]) / 2.0
+                midpoint_on_fungus[post_accepted] = points_inside_polygon(
+                    midpoints[post_accepted], secondary_roi
+                )
+            steps_on_fungus = post_accepted & midpoint_on_fungus
+            steps_off_fungus = post_accepted & ~midpoint_on_fungus
+            frames_on = int(on_fungus.sum())
+            frames_off = int(off_fungus.sum())
+            count_steps_on = int(steps_on_fungus.sum())
+            count_steps_off = int(steps_off_fungus.sum())
+            output["post_wake_frames_on_fungus"] = frames_on
+            output["post_wake_frames_off_fungus"] = frames_off
+            output["post_wake_steps_on_fungus"] = count_steps_on
+            output["post_wake_steps_off_fungus"] = count_steps_off
+            distance_on = ""
+            distance_off = ""
+            if valid_step_count:
+                distance_on = float(
+                    step_distances[steps_on_fungus].sum()
+                )
+                distance_off = float(
+                    step_distances[steps_off_fungus].sum()
+                )
+                output["post_wake_distance_px_on_fungus"] = distance_on
+                output["post_wake_distance_px_off_fungus"] = distance_off
+            fungus_pass = (
+                frames_on + frames_off == valid_frames
+                and count_steps_on + count_steps_off == valid_step_count
+                and (
+                    not valid_step_count
+                    or math.isclose(
+                        float(distance_on) + float(distance_off),
+                        float(total_distance),
+                        rel_tol=1e-10,
+                        abs_tol=1e-8,
+                    )
+                )
+            )
+            if not fungus_pass:
+                raise AssertionError(
+                    "Post-wake fungus on/off partition failed"
+                )
+            output["post_wake_fungus_analysis_status"] = "PASS"
+            if valid_frames:
+                output["post_wake_off_fungus_proportion"] = (
+                    frames_off / valid_frames
+                )
+            if valid_step_count:
+                output[
+                    "post_wake_off_fungus_distance_px_per_available_step"
+                ] = float(distance_off) / valid_step_count
+                if count_steps_off:
+                    output["post_wake_speed_px_per_off_fungus_step"] = (
+                        float(distance_off) / count_steps_off
+                    )
+
+    if is_fight:
+        if wall_pass and fungus_pass:
+            open_and_off = open_area & off_fungus
+            steps_open_and_off = steps_open & steps_off_fungus
+            joint_frames = int(open_and_off.sum())
+            joint_steps = int(steps_open_and_off.sum())
+            joint_distance = (
+                float(step_distances[steps_open_and_off].sum())
+                if valid_step_count
+                else ""
+            )
+            output["post_wake_frames_open_and_off_fungus"] = joint_frames
+            output["post_wake_steps_open_and_off_fungus"] = joint_steps
+            output[
+                "post_wake_distance_px_open_and_off_fungus"
+            ] = joint_distance
+            if valid_frames:
+                output["post_wake_open_off_fungus_proportion"] = (
+                    joint_frames / valid_frames
+                )
+            if valid_step_count:
+                output[
+                    "post_wake_open_off_fungus_distance_px_per_available_step"
+                ] = float(joint_distance) / valid_step_count
+                if joint_steps:
+                    output[
+                        "post_wake_speed_px_per_open_off_fungus_step"
+                    ] = float(joint_distance) / joint_steps
+            output[
+                "post_wake_open_off_fungus_analysis_status"
+            ] = "PASS"
+            assert np.all(~open_and_off | open_area)
+            assert np.all(~open_and_off | off_fungus)
+            assert np.all(~steps_open_and_off | steps_open)
+            assert np.all(~steps_open_and_off | steps_off_fungus)
+        else:
+            output[
+                "post_wake_open_off_fungus_analysis_status"
+            ] = "NOT_CALCULATED_WALL_OR_FUNGUS_PARTITION_UNAVAILABLE"
+    return output
 
 
 def compute_turtling_candidates(
@@ -667,7 +1013,7 @@ def analyze(
     analysis_type: str = "",
     social_distance_threshold_px: float = 60.0,
     use_social_disappearance_in_calculations: bool = False,
-    one_frame_jump_threshold_px: float = 50.0,
+    one_frame_jump_threshold_px: float = 200.0,
     turtling_window_frames: int = 120,
     turtling_min_path_px: float = 120.0,
     turtling_max_radius90_px: float = 35.0,
@@ -897,8 +1243,13 @@ def analyze(
             valid_steps
             & (step_distances <= one_frame_jump_threshold_px)
         )
-        jump_qc = original_jump_qc[individual]
-        jump_artifact_frames = int(jump_qc["excluded_mask"].sum())
+        jump_qc = calculation_jump_qc[individual]
+        one_frame_jumps_excluded = int(
+            jump_qc["rejected_step_mask"].sum()
+        )
+        # Deprecated compatibility field: jump QC is now step-only and does
+        # not delete either endpoint coordinate.
+        jump_artifact_frames = 0
         if valid_steps.any():
             total_distance = float(step_distances[accepted_steps].sum())
         else:
@@ -940,20 +1291,15 @@ def analyze(
                 "with a missing coordinate at one or both endpoints; remaining "
                 "gaps were not bridged."
             )
-        if jump_artifact_frames:
+        if one_frame_jumps_excluded:
             warnings.append(
-                f"ANTI_JUMP_COORDINATE_QC: excluded {jump_artifact_frames} "
-                f"coordinate frame(s) initiated by a greater-than-"
-                f"{one_frame_jump_threshold_px:g}-pixel adjacent-frame jump. "
-                "These coordinates were excluded from latency, distance, wall, "
-                "fungus, social, and turtling calculations without interpolation."
-            )
-        if jump_qc["persistent_events"]:
-            warnings.append(
-                "PERSISTENT_JUMP_REVIEW_START: at least one jump did not return "
-                "near its pre-jump position within 120 frames, so the remaining "
-                "coordinates were conservatively excluded. Review the analysis "
-                "start with the GUI Jump Audit."
+                f"ANTI_JUMP_STEP_QC: excluded {one_frame_jumps_excluded} "
+                f"adjacent movement step(s) strictly greater than "
+                f"{one_frame_jump_threshold_px:g} pixels. Endpoint coordinates "
+                "remain available for frame-based wall/fungus counts; rejected "
+                "steps are excluded from latency chains, distance totals, ROI "
+                "movement distances, social movement distance, and PDF path "
+                "connections without interpolation."
             )
         turtling_result = turtling_by_animal[individual]
         turtling_candidate_frames = int(
@@ -1196,6 +1542,28 @@ def analyze(
                     "Social-distance metrics were not calculated "
                     "because exactly two IDtracker animals are required."
                 )
+        if crossing == "":
+            post_wake = blank_post_wake_metrics(
+                (
+                    "NOT_CALCULATED_INVALID_BASELINE"
+                    if not original_valid[0]
+                    else "NOT_CALCULATED_THRESHOLD_NOT_REACHED"
+                ),
+                is_fight=is_fight,
+            )
+        else:
+            post_wake = compute_post_wake_metrics(
+                effective_xy=xy,
+                raw_xy=raw_observed_xy,
+                wake_offset=int(latency),
+                step_distances=step_distances,
+                accepted_steps=accepted_steps,
+                rejected_jump_steps=jump_qc["rejected_step_mask"],
+                primary_roi=primary_roi,
+                secondary_roi=secondary_roi,
+                wall_buffer_px=wall_buffer_px,
+                is_fight=is_fight,
+            )
         warning = " ".join(warnings)
 
         output.append(
@@ -1211,11 +1579,16 @@ def analyze(
                 "threshold_crossing_global_frame": crossing,
                 "latency_to_threshold_frames": latency,
                 "total_distance_px_in_analysis_window": total_distance,
+                "one_frame_jump_threshold_px": (
+                    one_frame_jump_threshold_px
+                ),
+                "one_frame_jumps_excluded": one_frame_jumps_excluded,
                 "jump_threshold_px": one_frame_jump_threshold_px,
                 "jump_artifact_coordinate_frames_excluded": (
                     jump_artifact_frames
                 ),
                 "jump_qc_status": jump_qc["status"],
+                **post_wake,
                 "wall_buffer_px": wall_buffer_px,
                 "frames_inside_wall_buffer": frames_in_wall,
                 "frames_outside_wall_buffer": frames_outside_wall,
@@ -1322,7 +1695,12 @@ def write_plot_pdf(
     start = int(rows[0]["analysis_start_frame"])
     end = int(rows[0]["analysis_end_frame_inclusive"])
     raw_window_arr = arr[start : end + 1]
-    one_frame_jump_threshold_px = float(rows[0]["jump_threshold_px"])
+    one_frame_jump_threshold_px = float(
+        rows[0].get(
+            "one_frame_jump_threshold_px",
+            rows[0]["jump_threshold_px"],
+        )
+    )
     plot_jump_qc = [
         filter_jump_artifact_coordinates(
             raw_window_arr[:, animal, :],
@@ -1390,16 +1768,38 @@ def write_plot_pdf(
     )
     if qc_record_id:
         page_context += f"    |    QC record: {qc_record_id}"
+    identity_lines = (
+        textwrap.wrap(
+            page_video,
+            width=92,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+        + textwrap.wrap(
+            page_context,
+            width=104,
+            break_long_words=True,
+            break_on_hyphens=False,
+        )
+    )
+    identity_top = 0.992
+    identity_spacing = 0.018
+    identity_bottom = (
+        identity_top - identity_spacing * (len(identity_lines) - 1)
+    )
+    plot_content_top = min(0.93, identity_bottom - 0.018)
 
     def add_page_identity(fig):
-        fig.text(
-            0.5, 0.99, page_video,
-            ha="center", va="top", fontsize=9, fontweight="bold",
-        )
-        fig.text(
-            0.5, 0.97, page_context,
-            ha="center", va="top", fontsize=9, fontweight="bold",
-        )
+        for line_number, line in enumerate(identity_lines):
+            fig.text(
+                0.5,
+                identity_top - identity_spacing * line_number,
+                line,
+                ha="center",
+                va="top",
+                fontsize=9,
+                fontweight="bold",
+            )
 
     finite_sets = [
         xy[np.isfinite(xy).all(axis=1)] for xy in window_arr.transpose(1, 0, 2)
@@ -1470,7 +1870,9 @@ def write_plot_pdf(
         jump_qc = filter_jump_artifact_coordinates(
             xy, threshold_px=one_frame_jump_threshold_px
         )
-        endpoints = np.flatnonzero(jump_qc["excluded_mask"])
+        endpoints = np.flatnonzero(
+            jump_qc["rejected_step_mask"]
+        ) + 1
         if not endpoints.size:
             return
         ax.scatter(
@@ -1520,8 +1922,8 @@ def write_plot_pdf(
                 ax,
                 raw_window_arr[:, animal, :],
                 label=(
-                    f"animal {animal} raw coordinate excluded by "
-                    f">{one_frame_jump_threshold_px:g} px jump QC"
+                    f"animal {animal} destination after rejected "
+                    f">{one_frame_jump_threshold_px:g} px step"
                 ),
             )
             draw_turtling_overlay_2d(ax, animal, xy)
@@ -1542,7 +1944,7 @@ def write_plot_pdf(
                         label=f"animal {animal} threshold crossing",
                     )
         style_2d(ax, "Both tracks within the inclusive analysis window")
-        fig.tight_layout(rect=[0, 0.08, 1, 0.93])
+        fig.tight_layout(rect=[0, 0.08, 1, plot_content_top])
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -1561,8 +1963,8 @@ def write_plot_pdf(
                 ax,
                 raw_window_arr[:, animal, :],
                 label=(
-                    f"raw coordinate excluded by "
-                    f">{one_frame_jump_threshold_px:g} px jump QC"
+                    f"destination after rejected "
+                    f">{one_frame_jump_threshold_px:g} px step"
                 ),
             )
             draw_turtling_overlay_2d(ax, animal, xy)
@@ -1585,7 +1987,7 @@ def write_plot_pdf(
                 ax,
                 f"IDtracker animal {animal}: {rows[animal]['starting_side']}",
             )
-            fig.tight_layout(rect=[0, 0.08, 1, 0.93])
+            fig.tight_layout(rect=[0, 0.08, 1, plot_content_top])
             pdf.savefig(fig)
             plt.close(fig)
 
@@ -1670,7 +2072,7 @@ def write_plot_pdf(
             ax.tick_params(labelsize=7, pad=1)
         fig.suptitle(
             "3D tracks through global frames - one panel per IDtracker animal",
-            fontsize=14, y=0.91,
+            fontsize=14, y=min(0.91, plot_content_top - 0.01),
         )
         fig.tight_layout(rect=[0.02, 0.03, 0.98, 0.86], w_pad=2.5)
         pdf.savefig(fig)
@@ -1761,7 +2163,9 @@ def write_plot_pdf(
                 0.08, 0.04, annotation, ha="left", va="bottom",
                 fontsize=8.5,
             )
-            fig.tight_layout(rect=[0, 0.18, 1, 0.91])
+            fig.tight_layout(
+                rect=[0, 0.18, 1, min(0.91, plot_content_top)]
+            )
             add_page_identity(fig)
             pdf.savefig(fig)
             plt.close(fig)
@@ -1859,14 +2263,19 @@ def write_plot_pdf(
                 "point-to-segment distances, not the raster.",
                 ha="center", va="bottom", fontsize=8,
             )
-            fig.tight_layout(rect=[0, 0.09, 1, 0.93])
+            fig.tight_layout(rect=[0, 0.09, 1, plot_content_top])
             pdf.savefig(fig)
             plt.close(fig)
 
         # Metadata is deliberately the final page for fast visual review.
         fig = plt.figure(figsize=(8.5, 11))
         add_page_identity(fig)
-        fig.suptitle("IDtracker analysis-window metadata", fontsize=16, y=0.925)
+        metadata_title_y = min(0.925, plot_content_top - 0.005)
+        fig.suptitle(
+            "IDtracker analysis-window metadata",
+            fontsize=16,
+            y=metadata_title_y,
+        )
         summary_lines = [
             f"Post-processing script version: {rows[0]['script_version']}",
             f"Video: {video_name}",
@@ -1891,16 +2300,20 @@ def write_plot_pdf(
             f"Coordinate observations in a complete window: {end - start + 1}",
             f"Displacement threshold: {rows[0]['movement_threshold_px']} pixels",
             (
-                "Coordinate-jump threshold: review adjacent movement > "
-                f"{rows[0]['jump_threshold_px']} pixels"
+                "One-frame movement-step threshold: reject adjacent steps > "
+                f"{one_frame_jump_threshold_px:g} pixels"
             ),
             (
-                "Jump-artifact coordinate frames excluded by animal: "
+                "One-frame movement steps excluded by animal: "
                 + "; ".join(
                     f"{row['idtracker_animal_id']}="
-                    f"{row['jump_artifact_coordinate_frames_excluded']}"
+                    f"{row['one_frame_jumps_excluded']}"
                     for row in rows
                 )
+            ),
+            (
+                "Jump endpoint coordinates retained for frame-based ROI counts; "
+                "PDF paths break at rejected steps."
             ),
             (
                 "Jump QC status by animal: "
@@ -1983,6 +2396,21 @@ def write_plot_pdf(
                     for row in rows
                 ],
                 "",
+                "Post-wake opportunity summaries:",
+                *[
+                    (
+                        f"  IDtracker animal {row['idtracker_animal_id']}: "
+                        f"status={row['post_wake_analysis_status']}; "
+                        f"valid steps="
+                        f"{row['post_wake_valid_movement_steps'] if row['post_wake_valid_movement_steps'] != '' else 'NA'}; "
+                        f"distance="
+                        f"{row['post_wake_total_distance_px'] if row['post_wake_total_distance_px'] != '' else 'NA'} px; "
+                        f"distance/valid step="
+                        f"{row['post_wake_distance_px_per_valid_step'] if row['post_wake_distance_px_per_valid_step'] != '' else 'NA'}"
+                    )
+                    for row in rows
+                ],
+                "",
                 "Social-distance measures are screening summaries, not confirmed fights.",
                 "Dark-red paths are provisional turtling candidates, not posture proof.",
                 "No general interpolation is performed by this prototype.",
@@ -1992,7 +2420,8 @@ def write_plot_pdf(
                 ),
                 (
                     "Track lines break at original missing coordinates and "
-                    "jump-artifact coordinates excluded by QC."
+                    f"adjacent steps >{one_frame_jump_threshold_px:g} pixels; "
+                    "endpoint coordinates remain available for frame counts."
                 ),
                 "All axes use pixels or global frames; no seconds are used.",
             ]
@@ -2002,15 +2431,17 @@ def write_plot_pdf(
             wrapped_summary_lines.extend(
                 textwrap.wrap(
                     line,
-                    width=100,
+                    width=88,
                     subsequent_indent="  ",
-                    break_long_words=False,
+                    break_long_words=True,
                     break_on_hyphens=False,
                 )
                 or [""]
             )
         fig.text(
-            0.06, 0.88, "\n".join(wrapped_summary_lines),
+            0.06,
+            min(0.86, metadata_title_y - 0.055),
+            "\n".join(wrapped_summary_lines),
             va="top", ha="left", fontsize=8.5, family="monospace",
         )
         pdf.savefig(fig)
@@ -2030,7 +2461,7 @@ def main() -> int:
         "--social-distance-threshold-px", default=60.0, type=float
     )
     parser.add_argument(
-        "--one-frame-jump-threshold-px", default=50.0, type=float
+        "--one-frame-jump-threshold-px", default=200.0, type=float
     )
     parser.add_argument(
         "--use-social-disappearance-in-calculations",

@@ -16,11 +16,17 @@ that remain ambiguous. Items in the second section are **not implemented**.
 - Original missing frames, social-disappearance substitutions, and remaining
   unusable coordinate frames are reported separately.
 - Adjacent movement steps strictly greater than the GUI jump threshold
-  (default 50 pixels) initiate coordinate-level QC. A returning excursion is
-  excluded through the frame before return; a persistent relocation excludes
-  the remainder and is flagged for Jump Audit start review. Excluded
-  coordinates contribute to no latency, distance, wall, fungus, social, or
-  turtling calculation. Raw IDtracker files remain untouched.
+  (researcher-selected default 200 pixels) are rejected from latency chains,
+  distance totals, ROI movement distances, social movement distance, and PDF
+  path connections. Endpoint coordinates remain available for frame-based
+  location counts. Raw IDtracker files remain untouched.
+- Post-wake calculations use the provisional first valid 30-pixel crossing
+  through the inclusive end. Their movement-opportunity denominator is the
+  number of valid adjacent steps, never elapsed frames. Missing gaps and
+  rejected jump steps are not bridged.
+- Post-wake wall, fungus, and direct open-and-off-fungus summaries include both
+  opportunity-adjusted distance and conditional speed fields with explicit
+  partition statuses. BA fungus/joint fields are explicitly not applicable.
 - A parsed `video_year` column is populated only for recognized 2025 and 2026
   recording dates.
 - Fight-only social-distance summaries use one GUI threshold, default 60
@@ -72,30 +78,37 @@ Please specify:
 
 No sustained wake-up result should be produced until these are fixed.
 
-### 3. Distance after waking
+### 3. Distance after waking — implemented provisional definition
 
-A proposed auditable definition is:
+The implemented auditable definition is:
 
 `sum Euclidean distance between adjacent valid coordinates from wake frame
-through the last valid frame`.
+through the inclusive analysis end`.
 
-A missing coordinate would break that individual step; the script would not
-bridge a gap and would report excluded-step counts. The proposed adjusted value
-would be pixels per valid adjacent-frame step after waking—not pixels per every
-elapsed frame—unless a different missing-data policy is approved.
+A missing coordinate breaks the adjacent steps touching it, and a step strictly
+greater than 200 pixels is rejected. The script does not bridge either case and
+reports missing-frame and rejected-step counts separately. The adjusted value
+is pixels per valid adjacent-frame movement opportunity after waking—not pixels
+per elapsed frame.
 
-### 4. “Time in the open” note
+This still uses the first crossing rather than a sustained crossing because the
+sustained run-length rule remains unresolved.
 
-`frames_not_in_roi_border_buffer - total_time_available_to_move` is not an
-adjustment and will generally be zero or negative. Plausible alternatives are:
+### 4. Open-area summaries — implemented definitions
 
-- open frames after waking;
-- `open frames after waking / valid frames available after waking`;
-- moving-open frames after waking;
-- `moving-open frames / valid frames available after waking`.
+The earlier subtraction
+`frames_not_in_roi_border_buffer - total_time_available_to_move` is not used.
+The implemented post-wake summaries are:
 
-The intended numerator, denominator, and pre-/post-wake restriction must be
-selected explicitly.
+- open-area proportion = open centroid frames / valid coordinate frames;
+- open distance per available step = open midpoint-classified distance / all
+  valid post-wake movement steps;
+- conditional open speed = open midpoint-classified distance / open-classified
+  post-wake steps.
+
+Fight rows use analogous off-fungus summaries and a direct intersection of the
+open and off-fungus masks. These are screening summaries pending biological
+review, but their numerators and denominators are now mathematically fixed.
 
 ### 5. Implemented wall and fungus geometry
 
@@ -140,7 +153,7 @@ range, are then both visibly farther apart than the threshold for at least one
 frame, and later return within range. A missing-only gap cannot establish
 separation and does not count as a return event.
 
-The optional switch is off by default. When enabled, the copied partner
+The optional switch is on by default. When enabled, the copied partner
 centroid is used for total distance and wall/fungus frame and distance
 calculations, including entry and exit steps. Latency, original missing counts,
 and return-event detection remain based on the original coordinates. Every row

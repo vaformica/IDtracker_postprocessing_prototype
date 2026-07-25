@@ -164,7 +164,7 @@ def _synchronized_clusters(track_rows: list[dict]) -> list[dict]:
 
 
 def audit_manifest(manifest: dict) -> dict:
-    threshold_px = float(manifest.get("jump_threshold_px", 50.0))
+    threshold_px = float(manifest.get("jump_threshold_px", 200.0))
     window = int(manifest.get("window_frames", 7200))
     records = list(manifest.get("records") or [])
     tracks = []

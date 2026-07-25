@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import math
 import queue
 import re
 import shlex
@@ -272,6 +273,468 @@ START APPROVED FROM JUMP AUDIT
 The researcher clicked approval for a video-wide synchronized-disturbance
 recommendation. The original start and audit evidence are retained in output
 provenance columns."""
+
+SETTINGS_FORMAT = "IDTRACKER_POSTPROCESSING_SETTINGS"
+SETTINGS_SCHEMA_VERSION = 1
+GUI_SETTINGS_KEYS = (
+    "host",
+    "key",
+    "roots",
+    "output_root",
+    "remote_python",
+    "window_frames",
+    "threshold",
+    "wall_buffer",
+    "fungus_buffer",
+    "social_distance",
+    "one_frame_jump",
+    "use_social_disappearance",
+    "turtling_window",
+    "turtling_min_path",
+    "turtling_max_radius90",
+    "turtling_min_turns",
+    "turtling_max_straightness",
+    "turtling_max_step",
+    "execution_mode",
+    "slurm_max_concurrent",
+    "slurm_account",
+    "slurm_partition",
+    "slurm_time",
+    "slurm_memory",
+)
+
+
+def saved_start_decisions(records):
+    """Return auditable positive start decisions without animal-row duplication."""
+    decisions = []
+    seen = set()
+    for record in records:
+        try:
+            start = int(str(record.get("start") or "").strip())
+        except ValueError:
+            continue
+        if start <= 0:
+            continue
+        record_id = str(record.get("qc_record_id") or "").strip()
+        stable_key = (
+            normalized_video_name(record.get("video", "")),
+            str(record.get("cell_label") or "").strip(),
+            str(record.get("analysis") or "").strip().lower(),
+        )
+        key = ("QC", record_id) if record_id else ("STABLE",) + stable_key
+        if key in seen:
+            continue
+        seen.add(key)
+        decisions.append(
+            {
+                "scope": "SESSION",
+                "qc_record_id": record_id,
+                "video": record.get("video", ""),
+                "cell_label": record.get("cell_label", ""),
+                "analysis": record.get("analysis", ""),
+                "start_global_frame": start,
+                "archived_original_start_frame": record.get(
+                    "archived_original_start", ""
+                ),
+                "status": record.get("status", ""),
+                "decision_source": record.get(
+                    "start_decision_source", ""
+                ),
+                "decision_provenance": record.get(
+                    "start_decision_provenance", ""
+                ),
+            }
+        )
+    return decisions
+
+
+def validate_settings_bundle(payload):
+    """Validate a reusable settings bundle before any GUI state is changed."""
+    if not isinstance(payload, dict):
+        raise ValueError("Settings file must contain one JSON object")
+    if payload.get("format") != SETTINGS_FORMAT:
+        raise ValueError(
+            f"Unrecognized settings format; expected {SETTINGS_FORMAT}"
+        )
+    if payload.get("schema_version") != SETTINGS_SCHEMA_VERSION:
+        raise ValueError(
+            "Unsupported settings schema version: "
+            f"{payload.get('schema_version')!r}"
+        )
+    gui_settings = payload.get("gui_settings") or {}
+    if not isinstance(gui_settings, dict):
+        raise ValueError("gui_settings must be a JSON object")
+    unknown = sorted(set(gui_settings) - set(GUI_SETTINGS_KEYS))
+    if unknown:
+        raise ValueError(
+            "Unknown GUI setting(s): " + ", ".join(unknown)
+        )
+    positive_numeric = {
+        "window_frames",
+        "threshold",
+        "social_distance",
+        "one_frame_jump",
+        "turtling_window",
+        "turtling_min_path",
+        "turtling_max_radius90",
+        "turtling_min_turns",
+        "turtling_max_step",
+        "slurm_max_concurrent",
+    }
+    nonnegative_numeric = {"wall_buffer", "fungus_buffer"}
+    for key in positive_numeric | nonnegative_numeric:
+        if key not in gui_settings:
+            continue
+        try:
+            number = float(gui_settings[key])
+        except (TypeError, ValueError):
+            raise ValueError(f"GUI setting {key} must be numeric") from None
+        if key in positive_numeric and number <= 0:
+            raise ValueError(f"GUI setting {key} must be positive")
+        if key in nonnegative_numeric and number < 0:
+            raise ValueError(f"GUI setting {key} cannot be negative")
+    if "turtling_max_straightness" in gui_settings:
+        try:
+            straightness = float(gui_settings["turtling_max_straightness"])
+        except (TypeError, ValueError):
+            raise ValueError(
+                "GUI setting turtling_max_straightness must be numeric"
+            ) from None
+        if not 0 <= straightness <= 1:
+            raise ValueError(
+                "GUI setting turtling_max_straightness must be between 0 and 1"
+            )
+    if (
+        "use_social_disappearance" in gui_settings
+        and not isinstance(gui_settings["use_social_disappearance"], bool)
+    ):
+        raise ValueError("use_social_disappearance must be true or false")
+    if (
+        "execution_mode" in gui_settings
+        and gui_settings["execution_mode"]
+        not in {"SLURM job array", "Direct SSH (small test only)"}
+    ):
+        raise ValueError("Unrecognized execution_mode in settings file")
+    decisions = payload.get("start_decisions") or []
+    if not isinstance(decisions, list):
+        raise ValueError("start_decisions must be a JSON array")
+    normalized_decisions = []
+    for index, decision in enumerate(decisions, start=1):
+        if not isinstance(decision, dict):
+            raise ValueError(
+                f"start_decisions item {index} must be a JSON object"
+            )
+        scope = str(decision.get("scope") or "SESSION").strip().upper()
+        if scope not in {"SESSION", "VIDEO"}:
+            raise ValueError(
+                f"start_decisions item {index} has invalid scope {scope!r}"
+            )
+        try:
+            start = int(decision.get("start_global_frame"))
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"start_decisions item {index} has a non-integer start"
+            ) from None
+        if start <= 0:
+            raise ValueError(
+                f"start_decisions item {index} must have a positive start"
+            )
+        record_id = str(decision.get("qc_record_id") or "").strip()
+        video = str(decision.get("video") or "").strip()
+        cell = str(decision.get("cell_label") or "").strip()
+        analysis = str(decision.get("analysis") or "").strip().lower()
+        if scope == "VIDEO" and not video:
+            raise ValueError(
+                f"start_decisions item {index} has VIDEO scope but no video"
+            )
+        if scope == "SESSION" and not record_id and not (
+            video and cell and analysis
+        ):
+            raise ValueError(
+                f"start_decisions item {index} lacks a QC ID or complete "
+                "video/cell/analysis key"
+            )
+        normalized_decisions.append(
+            {
+                **decision,
+                "scope": scope,
+                "qc_record_id": record_id,
+                "video": video,
+                "cell_label": cell,
+                "analysis": analysis,
+                "start_global_frame": start,
+            }
+        )
+    jump_audit = payload.get("jump_audit") or {}
+    if not isinstance(jump_audit, dict):
+        raise ValueError("jump_audit must be a JSON object")
+    for key in ("summaries", "tracks"):
+        if not isinstance(jump_audit.get(key) or [], list):
+            raise ValueError(f"jump_audit.{key} must be a JSON array")
+    return {
+        **payload,
+        "gui_settings": gui_settings,
+        "start_decisions": normalized_decisions,
+        "jump_audit": jump_audit,
+    }
+
+
+def settings_bundle_from_combined_rows(rows, source_name="combined CSV"):
+    """Recover settings and final starts from a prior combined-results CSV."""
+    if not rows:
+        raise ValueError("The combined-results CSV contains no data rows")
+    required = {
+        "qc_record_id",
+        "video",
+        "cell_label",
+        "analysis_type",
+        "analysis_start_frame",
+    }
+    missing = sorted(required - set(rows[0]))
+    if missing:
+        raise ValueError(
+            "This is not a recognized combined-results CSV; missing: "
+            + ", ".join(missing)
+        )
+    parameter_columns = {
+        "analysis_timespan_frames": "window_frames",
+        "movement_threshold_px": "threshold",
+        "wall_buffer_px": "wall_buffer",
+        "fungus_buffer_px": "fungus_buffer",
+        "social_distance_threshold_px": "social_distance",
+        "one_frame_jump_threshold_px": "one_frame_jump",
+        "turtling_window_frames": "turtling_window",
+        "turtling_min_path_px": "turtling_min_path",
+        "turtling_max_radius90_px": "turtling_max_radius90",
+        "turtling_min_turn_rotations": "turtling_min_turns",
+        "turtling_max_straightness": "turtling_max_straightness",
+        "turtling_max_step_px": "turtling_max_step",
+    }
+    gui_settings = {}
+    for csv_column, setting_name in parameter_columns.items():
+        values = {
+            str(row.get(csv_column) or "").strip()
+            for row in rows
+            if str(row.get(csv_column) or "").strip()
+        }
+        if len(values) > 1:
+            raise ValueError(
+                f"Prior results contain conflicting {csv_column} values"
+            )
+        if values:
+            gui_settings[setting_name] = values.pop()
+    canonical_jump_values = {
+        str(row.get("one_frame_jump_threshold_px") or "").strip()
+        for row in rows
+        if str(row.get("one_frame_jump_threshold_px") or "").strip()
+    }
+    legacy_jump_values = {
+        str(row.get("jump_threshold_px") or "").strip()
+        for row in rows
+        if str(row.get("jump_threshold_px") or "").strip()
+    }
+    if len(legacy_jump_values) > 1:
+        raise ValueError(
+            "Prior results contain conflicting jump_threshold_px values"
+        )
+    if canonical_jump_values and legacy_jump_values:
+        canonical = float(next(iter(canonical_jump_values)))
+        legacy = float(next(iter(legacy_jump_values)))
+        if not math.isclose(canonical, legacy):
+            raise ValueError(
+                "Prior results disagree between one_frame_jump_threshold_px "
+                "and its jump_threshold_px compatibility alias"
+            )
+    if "one_frame_jump" not in gui_settings and legacy_jump_values:
+        gui_settings["one_frame_jump"] = legacy_jump_values.pop()
+    social_values = {
+        str(row.get("use_social_disappearance_in_calculations") or "")
+        .strip()
+        .upper()
+        for row in rows
+        if str(row.get("use_social_disappearance_in_calculations") or "")
+        .strip()
+        .upper()
+        in {"YES", "NO"}
+    }
+    if len(social_values) > 1:
+        raise ValueError(
+            "Prior results contain conflicting social-disappearance switches"
+        )
+    if social_values:
+        gui_settings["use_social_disappearance"] = (
+            social_values.pop() == "YES"
+        )
+    by_record = {}
+    for line_number, row in enumerate(rows, start=2):
+        record_id = str(row.get("qc_record_id") or "").strip()
+        try:
+            start = int(str(row.get("analysis_start_frame") or "").strip())
+        except ValueError:
+            raise ValueError(
+                f"line {line_number}: analysis_start_frame is not an integer"
+            ) from None
+        candidate = {
+            "scope": "SESSION",
+            "qc_record_id": record_id,
+            "video": row.get("video", ""),
+            "cell_label": row.get("cell_label", ""),
+            "analysis": row.get("analysis_type", ""),
+            "start_global_frame": start,
+            "archived_original_start_frame": row.get(
+                "archived_original_start_frame", ""
+            ),
+            "status": {
+                "JUMP_AUDIT_APPROVED": "START APPROVED FROM JUMP AUDIT",
+                "SOURCE_INTERVAL": "REVIEW DETECTED START",
+            }.get(
+                row.get("start_frame_decision_source"),
+                "START MANUALLY APPROVED",
+            ),
+            "decision_source": row.get(
+                "start_frame_decision_source", ""
+            ),
+            "decision_provenance": row.get(
+                "start_frame_decision_provenance", ""
+            ),
+        }
+        previous = by_record.get(record_id)
+        if previous and previous != candidate:
+            raise ValueError(
+                f"Conflicting animal rows for QC record {record_id}"
+            )
+        by_record[record_id] = candidate
+    return validate_settings_bundle(
+        {
+            "format": SETTINGS_FORMAT,
+            "schema_version": SETTINGS_SCHEMA_VERSION,
+            "saved_at": "",
+            "script_version": str(rows[0].get("script_version") or ""),
+            "source": source_name,
+            "gui_settings": gui_settings,
+            "start_decisions": list(by_record.values()),
+            "jump_audit": {"summaries": [], "tracks": []},
+        }
+    )
+
+
+def _audit_csv_value(key, value):
+    """Restore CSV-safe jump-audit values needed by the GUI."""
+    text = str(value or "").strip()
+    if key == "suggested_full_window_fits":
+        return text.lower() in {"true", "1", "yes"}
+    if key in {
+        "approved_records",
+        "animal_tracks",
+        "tracks_with_jumps",
+        "persistent_jump_tracks",
+        "last_synchronized_disturbance_frame",
+        "suggested_start_global_frame",
+        "return_horizon_frames",
+        "synchrony_tolerance_frames",
+    }:
+        if not text:
+            return ""
+        try:
+            return int(float(text))
+        except ValueError:
+            return text
+    if key == "jump_threshold_px":
+        try:
+            return float(text)
+        except ValueError:
+            return text
+    if text.startswith(("[", "{")):
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            return text
+    return value
+
+
+def settings_bundle_from_jump_audit_rows(
+    summaries, tracks=None, source_name="jump-audit CSV"
+):
+    """Recover an earlier audit table and its approved video decisions."""
+    if not summaries:
+        raise ValueError("The jump-audit video CSV contains no data rows")
+    required = {
+        "video",
+        "analysis_type",
+        "suggested_start_global_frame",
+        "audit_version",
+        "decision",
+    }
+    missing = sorted(required - set(summaries[0]))
+    if missing:
+        raise ValueError(
+            "This is not a recognized jump-audit video CSV; missing: "
+            + ", ".join(missing)
+        )
+    restored = [
+        {key: _audit_csv_value(key, value) for key, value in row.items()}
+        for row in summaries
+    ]
+    restored_tracks = [
+        {key: _audit_csv_value(key, value) for key, value in row.items()}
+        for row in (tracks or [])
+    ]
+    thresholds = {
+        str(row.get("jump_threshold_px") or "").strip()
+        for row in restored
+        if str(row.get("jump_threshold_px") or "").strip()
+    }
+    if len(thresholds) > 1:
+        raise ValueError("Jump-audit CSV contains conflicting thresholds")
+    gui_settings = {}
+    if thresholds:
+        gui_settings["one_frame_jump"] = thresholds.pop()
+    decisions = []
+    for summary in restored:
+        if str(summary.get("decision") or "").strip().upper() != "APPROVED":
+            continue
+        start = summary.get("suggested_start_global_frame")
+        if start == "":
+            raise ValueError(
+                f"Approved audit row for {summary.get('video')} has no start"
+            )
+        decisions.append(
+            {
+                "scope": "VIDEO",
+                "qc_record_id": "",
+                "video": summary.get("video", ""),
+                "cell_label": "",
+                "analysis": summary.get("analysis_type", ""),
+                "start_global_frame": int(start),
+                "archived_original_start_frame": "",
+                "status": "START APPROVED FROM JUMP AUDIT",
+                "decision_source": "JUMP_AUDIT_APPROVED",
+                "decision_provenance": (
+                    f"Restored approved jump audit v"
+                    f"{summary.get('audit_version')}; last synchronized "
+                    f"disturbance frame "
+                    f"{summary.get('last_synchronized_disturbance_frame')}; "
+                    f"jump threshold {summary.get('jump_threshold_px')} px; "
+                    f"approved replacement start {start}"
+                ),
+            }
+        )
+    return validate_settings_bundle(
+        {
+            "format": SETTINGS_FORMAT,
+            "schema_version": SETTINGS_SCHEMA_VERSION,
+            "saved_at": "",
+            "script_version": "",
+            "source": source_name,
+            "gui_settings": gui_settings,
+            "start_decisions": decisions,
+            "jump_audit": {
+                "timestamp": "",
+                "summaries": restored,
+                "tracks": restored_tracks,
+            },
+        }
+    )
 
 
 def make_missing_start_report(records):
@@ -545,6 +1008,8 @@ class App(tk.Tk):
         self.jump_audit_tracks = []
         self.jump_audit_rows = {}
         self.jump_audit_timestamp = ""
+        self.loaded_start_decisions = []
+        self.loaded_settings_source = ""
         self.sort_column = "video_name"
         self.sort_reverse = False
 
@@ -558,6 +1023,34 @@ class App(tk.Tk):
         self.notebook.add(self.sessions_tab, text="Sessions")
         self.notebook.add(self.jump_audit_tab, text="Jump Audit")
         self.notebook.add(self.logs_tab, text="Logs & Diagnostics")
+
+        saved_settings = ttk.LabelFrame(
+            self.setup_tab,
+            text="Reuse a previous troubleshooting setup",
+        )
+        saved_settings.pack(fill="x", padx=10, pady=(8, 4))
+        ttk.Button(
+            saved_settings,
+            text="Load previous settings or results",
+            command=self.load_previous_settings,
+        ).grid(row=0, column=0, sticky="w", padx=8, pady=6)
+        ttk.Button(
+            saved_settings,
+            text="Save current settings and decisions",
+            command=self.save_current_settings,
+        ).grid(row=0, column=1, sticky="w", padx=8, pady=6)
+        self.saved_settings_status = tk.StringVar(
+            value=(
+                "Loads reusable JSON, a prior combined-results CSV, or a "
+                "Jump Audit video CSV."
+            )
+        )
+        ttk.Label(
+            saved_settings,
+            textvariable=self.saved_settings_status,
+            anchor="w",
+        ).grid(row=0, column=2, sticky="ew", padx=8, pady=6)
+        saved_settings.columnconfigure(2, weight=1)
 
         connection = ttk.LabelFrame(
             self.setup_tab,
@@ -590,7 +1083,7 @@ class App(tk.Tk):
         self.wall_buffer = tk.StringVar(value="30")
         self.fungus_buffer = tk.StringVar(value="30")
         self.social_distance = tk.StringVar(value="60")
-        self.one_frame_jump = tk.StringVar(value="50")
+        self.one_frame_jump = tk.StringVar(value="200")
         self.use_social_disappearance = tk.BooleanVar(value=True)
         parameter_fields = [
             (
@@ -611,7 +1104,7 @@ class App(tk.Tk):
                 self.social_distance, 10,
             ),
             (
-                3, 0, "Coordinate-jump threshold (pixels)",
+                3, 0, "Coordinate-jump threshold (pixels; provisional)",
                 self.one_frame_jump, 10,
             ),
         ]
@@ -1526,6 +2019,32 @@ class App(tk.Tk):
 
     def load_scan(self, records):
         self.all_records = list(records)
+        restored_message = ""
+        if self.loaded_start_decisions:
+            try:
+                restored, unmatched = self._apply_loaded_start_decisions(
+                    self.loaded_start_decisions,
+                    self.loaded_settings_source,
+                )
+                restored_message = (
+                    f" Restored {restored} saved start decision(s); "
+                    f"{len(unmatched)} saved decision(s) did not match the "
+                    "current approved-session scan."
+                )
+                self.log(restored_message.strip())
+                for item in unmatched:
+                    self.log(f"UNMATCHED SAVED START: {item}")
+            except Exception as exc:
+                self.log(
+                    "ERROR: saved start decisions were not applied after scan: "
+                    f"{exc}"
+                )
+                messagebox.showerror(
+                    "Saved starts not applied",
+                    "The approved-session scan succeeded, but no saved start "
+                    "decision was applied because validation failed.\n\n"
+                    + str(exc),
+                )
         self.camera_filter_box.configure(
             values=["All cameras"]
             + sorted({r["camera"] for r in records if r["camera"]})
@@ -1556,6 +2075,394 @@ class App(tk.Tk):
             f"to process; {zero_or_missing} require a start; {blocked} lack a "
             "recognized IDtracker trajectory of any supported type; "
             f"{known} match the collaborator list. Older repeats were excluded."
+            + restored_message
+        )
+
+    def _settings_folder(self):
+        downloads = Path.home() / "Downloads"
+        base = downloads if downloads.is_dir() else Path.home()
+        return (
+            base
+            / "IDtracker_postprocessing_results"
+            / "saved_settings"
+        )
+
+    def _gui_settings_values(self):
+        return {
+            key: getattr(self, key).get()
+            for key in GUI_SETTINGS_KEYS
+        }
+
+    def _apply_gui_settings(self, settings):
+        for key, value in settings.items():
+            variable = getattr(self, key)
+            if key == "use_social_disappearance":
+                variable.set(bool(value))
+            else:
+                variable.set(str(value))
+
+    def _apply_loaded_start_decisions(self, decisions, source_name):
+        """Atomically match and apply saved decisions to the current scan."""
+        if not self.all_records:
+            return 0, [
+                decision.get("qc_record_id")
+                or decision.get("video")
+                or "unnamed decision"
+                for decision in decisions
+            ]
+        by_id = {
+            str(record.get("qc_record_id") or "").strip(): record
+            for record in self.all_records
+            if str(record.get("qc_record_id") or "").strip()
+        }
+        by_stable_key = {}
+        for record in self.all_records:
+            key = (
+                normalized_video_name(record.get("video", "")),
+                str(record.get("cell_label") or "").strip(),
+                str(record.get("analysis") or "").strip().lower(),
+            )
+            by_stable_key.setdefault(key, []).append(record)
+
+        planned = {}
+        unmatched = []
+        for decision in decisions:
+            scope = decision["scope"]
+            targets = []
+            if scope == "VIDEO":
+                video_key = normalized_video_name(decision["video"])
+                analysis = str(decision.get("analysis") or "").lower()
+                targets = [
+                    record
+                    for record in self.all_records
+                    if normalized_video_name(record.get("video", ""))
+                    == video_key
+                    and (
+                        not analysis
+                        or str(record.get("analysis") or "").lower()
+                        == analysis
+                    )
+                ]
+            else:
+                record_id = decision.get("qc_record_id", "")
+                if record_id and record_id in by_id:
+                    target = by_id[record_id]
+                    expected_video = normalized_video_name(
+                        decision.get("video", "")
+                    )
+                    expected_cell = str(
+                        decision.get("cell_label") or ""
+                    ).strip()
+                    expected_analysis = str(
+                        decision.get("analysis") or ""
+                    ).strip().lower()
+                    if (
+                        expected_video
+                        and normalized_video_name(target.get("video", ""))
+                        != expected_video
+                    ):
+                        raise ValueError(
+                            f"QC record {record_id} now points to a different "
+                            "video; settings load was rejected"
+                        )
+                    if (
+                        expected_cell
+                        and str(target.get("cell_label") or "").strip()
+                        != expected_cell
+                    ):
+                        raise ValueError(
+                            f"QC record {record_id} now points to a different "
+                            "cell; settings load was rejected"
+                        )
+                    if (
+                        expected_analysis
+                        and str(target.get("analysis") or "").strip().lower()
+                        != expected_analysis
+                    ):
+                        raise ValueError(
+                            f"QC record {record_id} now points to a different "
+                            "analysis type; settings load was rejected"
+                        )
+                    targets = [target]
+                else:
+                    stable_key = (
+                        normalized_video_name(decision.get("video", "")),
+                        str(decision.get("cell_label") or "").strip(),
+                        str(decision.get("analysis") or "").strip().lower(),
+                    )
+                    candidates = by_stable_key.get(stable_key, [])
+                    if len(candidates) > 1:
+                        raise ValueError(
+                            "Saved stable key matches more than one current "
+                            f"session: {stable_key}"
+                        )
+                    targets = candidates
+            if not targets:
+                unmatched.append(
+                    decision.get("qc_record_id")
+                    or (
+                        f"{decision.get('video')} / "
+                        f"{decision.get('cell_label') or 'all cells'}"
+                    )
+                )
+                continue
+            for target in targets:
+                target_id = id(target)
+                previous = planned.get(target_id)
+                if (
+                    previous
+                    and previous["start_global_frame"]
+                    != decision["start_global_frame"]
+                ):
+                    raise ValueError(
+                        "Conflicting saved starts target current QC record "
+                        f"{target.get('qc_record_id')}"
+                    )
+                planned[target_id] = {
+                    "record": target,
+                    **decision,
+                }
+
+        restored_at = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+        for update in planned.values():
+            record = update["record"]
+            current_start = record.get("start", "")
+            archived = str(
+                update.get("archived_original_start_frame") or ""
+            ).strip()
+            if not archived:
+                archived = str(
+                    record.get("archived_original_start") or current_start
+                )
+            provenance = str(
+                update.get("decision_provenance") or ""
+            ).strip()
+            restoration = (
+                f"Restored {restored_at} from {Path(source_name).name}"
+            )
+            record["archived_original_start"] = archived
+            record["start"] = str(update["start_global_frame"])
+            record["status"] = (
+                update.get("status")
+                or (
+                    "START APPROVED FROM JUMP AUDIT"
+                    if update.get("decision_source")
+                    == "JUMP_AUDIT_APPROVED"
+                    else "START MANUALLY APPROVED"
+                )
+            )
+            record["start_decision_source"] = (
+                update.get("decision_source")
+                or "RESTORED_PREVIOUS_SETTINGS"
+            )
+            record["start_decision_provenance"] = (
+                f"{provenance}; {restoration}"
+                if provenance
+                else restoration
+            )
+        return len(planned), unmatched
+
+    def save_current_settings(self):
+        folder = self._settings_folder()
+        folder.mkdir(parents=True, exist_ok=True)
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        destination_text = filedialog.asksaveasfilename(
+            title="Save reusable post-processing settings",
+            initialdir=str(folder),
+            initialfile=f"postprocessing_settings_{stamp}.json",
+            defaultextension=".json",
+            filetypes=[("JSON settings", "*.json")],
+            confirmoverwrite=True,
+        )
+        if not destination_text:
+            return
+        destination = Path(destination_text)
+        payload = validate_settings_bundle(
+            {
+                "format": SETTINGS_FORMAT,
+                "schema_version": SETTINGS_SCHEMA_VERSION,
+                "saved_at": datetime.now().astimezone().isoformat(
+                    timespec="seconds"
+                ),
+                "script_version": SCRIPT_VERSION,
+                "gui_settings": self._gui_settings_values(),
+                "start_decisions": saved_start_decisions(
+                    self.all_records
+                ),
+                "jump_audit": {
+                    "timestamp": self.jump_audit_timestamp,
+                    "summaries": self.jump_audit_summaries,
+                    "tracks": self.jump_audit_tracks,
+                },
+            }
+        )
+        temporary = destination.with_name(destination.name + ".partial")
+        if temporary.exists():
+            messagebox.showerror(
+                "Partial settings file exists",
+                f"Refusing to overwrite:\n{temporary}",
+            )
+            return
+        try:
+            with temporary.open("x", encoding="utf-8") as stream:
+                json.dump(payload, stream, indent=2, sort_keys=True)
+                stream.write("\n")
+            temporary.replace(destination)
+        except Exception:
+            if temporary.exists():
+                temporary.unlink()
+            raise
+        self.saved_settings_status.set(
+            f"Saved {len(payload['start_decisions'])} start decision(s): "
+            f"{destination.name}"
+        )
+        self.log(
+            f"Saved reusable settings, {len(payload['start_decisions'])} "
+            f"start decision(s), and {len(self.jump_audit_summaries)} "
+            f"jump-audit video row(s) to {destination}"
+        )
+        messagebox.showinfo(
+            "Settings saved",
+            f"Saved reusable settings and decisions:\n\n{destination}",
+        )
+
+    @staticmethod
+    def _read_csv_rows(path):
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            return list(csv.DictReader(stream))
+
+    def load_previous_settings(self):
+        folder = self._settings_folder()
+        initial = folder if folder.is_dir() else folder.parent
+        source_text = filedialog.askopenfilename(
+            title="Load previous settings, results, or Jump Audit",
+            initialdir=str(initial),
+            filetypes=[
+                ("Reusable settings or CSV", "*.json *.csv"),
+                ("JSON settings", "*.json"),
+                ("CSV files", "*.csv"),
+                ("All files", "*"),
+            ],
+        )
+        if not source_text:
+            return
+        source = Path(source_text)
+        try:
+            supplement_existing = False
+            if source.suffix.lower() == ".json":
+                bundle = validate_settings_bundle(
+                    json.loads(source.read_text(encoding="utf-8"))
+                )
+            elif source.suffix.lower() == ".csv":
+                rows = self._read_csv_rows(source)
+                fields = set(rows[0]) if rows else set()
+                if {
+                    "analysis_start_frame",
+                    "qc_record_id",
+                    "script_version",
+                }.issubset(fields):
+                    bundle = settings_bundle_from_combined_rows(
+                        rows, source.name
+                    )
+                elif {
+                    "audit_version",
+                    "suggested_start_global_frame",
+                    "decision",
+                }.issubset(fields):
+                    supplement_existing = True
+                    tracks = []
+                    if source.name.endswith("_videos.csv"):
+                        tracks_path = source.with_name(
+                            source.name.replace(
+                                "_videos.csv", "_tracks.csv"
+                            )
+                        )
+                        if tracks_path.is_file():
+                            tracks = self._read_csv_rows(tracks_path)
+                    bundle = settings_bundle_from_jump_audit_rows(
+                        rows, tracks, source.name
+                    )
+                else:
+                    raise ValueError(
+                        "CSV is neither a combined-results file nor a Jump "
+                        "Audit video-summary file"
+                    )
+            else:
+                raise ValueError("Choose a .json or .csv settings source")
+
+            decisions = bundle["start_decisions"]
+            if self.all_records:
+                restored, unmatched = self._apply_loaded_start_decisions(
+                    decisions, str(source)
+                )
+            else:
+                restored, unmatched = 0, []
+            self._apply_gui_settings(bundle["gui_settings"])
+            if supplement_existing and self.loaded_start_decisions:
+                self.loaded_start_decisions = (
+                    list(self.loaded_start_decisions) + decisions
+                )
+                self.loaded_settings_source = (
+                    self.loaded_settings_source + " + " + str(source)
+                )
+            else:
+                self.loaded_start_decisions = decisions
+                self.loaded_settings_source = str(source)
+            audit = bundle.get("jump_audit") or {}
+            summaries = list(audit.get("summaries") or [])
+            tracks = list(audit.get("tracks") or [])
+            if summaries:
+                self.jump_audit_summaries = summaries
+                self.jump_audit_tracks = tracks
+                self.jump_audit_timestamp = (
+                    str(audit.get("timestamp") or "").strip()
+                    or datetime.fromtimestamp(
+                        source.stat().st_mtime
+                    ).strftime("%Y%m%d_%H%M%S")
+                )
+                self._render_jump_audit()
+                self.jump_audit_status.set(
+                    f"Loaded previous Jump Audit from {source.name}: "
+                    f"{len(summaries)} video row(s), "
+                    f"{sum(str(row.get('decision')).upper() == 'APPROVED' for row in summaries)} "
+                    "approved decision(s). No new Firebird audit was run."
+                )
+            self.apply_filters()
+        except Exception as exc:
+            messagebox.showerror(
+                "Previous settings rejected",
+                "No settings or start decisions were changed.\n\n"
+                + str(exc),
+            )
+            return
+
+        if not self.all_records and decisions:
+            decision_message = (
+                f"{len(self.loaded_start_decisions)} start decision(s) are "
+                "queued and will be "
+                "matched after Scan approved runs."
+            )
+        else:
+            decision_message = (
+                f"Restored {restored} current start decision(s); "
+                f"{len(unmatched)} did not match."
+            )
+        self.saved_settings_status.set(
+            f"Loaded {source.name}; jump threshold "
+            f"{self.one_frame_jump.get()} px. {decision_message}"
+        )
+        self.log(
+            f"Loaded previous settings from {source}; {decision_message}"
+        )
+        for item in unmatched:
+            self.log(f"UNMATCHED SAVED START: {item}")
+        messagebox.showinfo(
+            "Previous settings loaded",
+            f"Loaded:\n{source}\n\n{decision_message}\n\n"
+            f"Current jump threshold: {self.one_frame_jump.get()} px.\n"
+            "Review the visible settings before processing.",
         )
 
     def clear_filters(self):
