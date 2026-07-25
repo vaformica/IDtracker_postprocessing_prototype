@@ -76,7 +76,7 @@ class ProcessorTests(unittest.TestCase):
                 home
                 / "Downloads"
                 / "IDtracker_postprocessing_results"
-                / "results_20260724_220000_123456"
+                / "completed_run_20260724_220000_123456"
             )
             self.assertEqual(paths["completed_folder"], completed)
             self.assertEqual(
@@ -85,7 +85,7 @@ class ProcessorTests(unittest.TestCase):
             self.assertEqual(paths["partial_pdfs"].name, "pdfs")
             self.assertEqual(
                 paths["partial_folder"].name,
-                ".results_20260724_220000_123456.partial",
+                ".completed_run_20260724_220000_123456.partial",
             )
 
     def test_gui_and_processor_accept_exactly_the_same_source_names(self):

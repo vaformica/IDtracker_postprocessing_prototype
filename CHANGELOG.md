@@ -4,6 +4,15 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.5.3 - 2026-07-24
+
+- Clarified automatic Mac downloads: every successful run creates
+  `completed_run_YYYYMMDD_HHMMSS_microseconds/` under
+  `~/Downloads/IDtracker_postprocessing_results/`.
+- Each completed-run folder contains the matching `combined_results.csv` and
+  `pdfs/` collection; the entire folder is promoted atomically from a hidden
+  partial folder only after both downloads finish.
+
 ## 0.5.2 - 2026-07-24
 
 - Fixed Jump Audit omission of videos deliberately marked for manual start

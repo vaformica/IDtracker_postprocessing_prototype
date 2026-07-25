@@ -468,8 +468,8 @@ def automatic_download_paths(token: str, home: Path | None = None) -> dict:
     local_root = (
         downloads if downloads.is_dir() else home
     ) / "IDtracker_postprocessing_results"
-    completed_folder = local_root / f"results_{token}"
-    partial_folder = local_root / f".results_{token}.partial"
+    completed_folder = local_root / f"completed_run_{token}"
+    partial_folder = local_root / f".completed_run_{token}.partial"
     return {
         "root": local_root,
         "completed_folder": completed_folder,

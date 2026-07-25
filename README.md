@@ -106,13 +106,12 @@ are cleaned up and never become the canonical result. The full calculation speci
 `METHODS.html`. Proposed Kiran-analysis variables and remaining definition
 questions are tracked in `ANALYSIS_REQUIREMENTS_REVIEW.md`.
 
-After a complete processing batch is promoted, the GUI automatically saves a
-timestamped copy on the Mac under:
+After a complete processing batch is promoted, the GUI automatically creates
+one timestamped completed-run folder under:
 
-`~/Downloads/IDtracker_postprocessing_results`
+`~/Downloads/IDtracker_postprocessing_results/completed_run_YYYYMMDD_HHMMSS_microseconds/`
 
-Each completed run is saved in one timestamped folder:
-`results_YYYYMMDD_HHMMSS_microseconds/`. That folder contains
+That folder contains
 `combined_results.csv` and `pdfs/`. The entire folder is first staged under a
 hidden `.partial` name and becomes visible only after both the CSV and all PDFs
 finish downloading. The manual download buttons remain available.
