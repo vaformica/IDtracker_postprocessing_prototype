@@ -30,6 +30,9 @@ This repository is the standalone IDtracker post-processing prototype.
   post-processing QC, retains and ranks duplicates, builds an independent
   approved-results data file, writes an actionable rerun report, and adds
   prominent PDF missing-frame review.
+- `v0.8.1` adds rapid PDF review keyboard controls, cached local PDF opening,
+  automatic next-PDF advance after approve/rerun, and a local QC export package
+  with approved CSV, rerun CSV, and approved PDF copies.
 
 The automated suite contains 63 tests. Firebird execution remains a separate
 validation step and is not implied by local test success.

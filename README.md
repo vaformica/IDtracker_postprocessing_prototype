@@ -55,7 +55,7 @@ analysis-start frame so that a later, separately audited metadata workflow can
 connect trajectory identity to a beetle library ID.
 
 The same source video can contribute multiple cell sessions. The same
-video/cell/analysis can also have repeated IDtracker runs. Version 0.8.0 scans
+video/cell/analysis can also have repeated IDtracker runs. Version 0.8.1 scans
 all IDtracker sessions under the researcher-entered Firebird roots and does
 not consult the old pipeline approval CSV. Every repeat remains visible, but
 only the deterministic newest run for each `(video, cell, analysis)` key is
@@ -175,6 +175,10 @@ silently changing the larger production QC pipeline.
   and ranked duplicates, added append-only approve/rerun decisions and an
   authoritative approved-results file, and placed missing-coordinate counts
   and percentages prominently on PDF page 1.
+- **v0.8.1:** added old-GUI-style rapid PDF review: spacebar opens the cached
+  PDF, `A` approves, `R` marks rerun, and the next unreviewed processed PDF
+  opens automatically. Also added a local QC export folder with approved CSV,
+  rerun CSV, and approved PDF copies.
 
 The changelog is authoritative for the detailed release record. Older output
 files remain scientifically tied to the `script_version` written in each row;
@@ -406,15 +410,26 @@ Workflow:
 11. Process. After successful remote completion, leave the GUI open while it
     automatically downloads and verifies the timestamped CSV/PDF folder. The
     final chime and popup identify the completed Mac folder.
-12. In **Post-processing QC**, open and review the selected downloaded PDF.
-    Page 1 shows the video, cell, and large missing-coordinate count and
-    percentage for every IDtracker animal.
-13. Click **Approve selected processed session(s)** only when the
-    post-processing output is suitable. The animal rows are added to
-    Firebird's `postprocessing_qc/approved_results_latest.csv`.
-14. If IDtracker should be rerun or its settings changed, click **Mark selected
-    for IDtracker rerun** and enter an actionable reason. This updates
-    `sessions_marked_rerun_latest.csv`; it does not run or alter IDtracker.
+12. In **Post-processing QC**, click **Start rapid review**. The GUI indexes the
+    downloaded local `pdfs/` folder, selects the first unreviewed processed
+    newest run, and opens its PDF. Page 1 shows the video, cell, and large
+    missing-coordinate count and percentage for every IDtracker animal.
+13. During rapid review, use the keyboard while the QC table is focused:
+    spacebar opens the selected cached PDF again, `A` approves the selected run,
+    and `R` marks it for IDtracker rerun. After `A` or `R`, the GUI records the
+    decision on Firebird and automatically opens the next unreviewed processed
+    PDF.
+14. Use **Approve selected processed session(s)** for slower confirmed approval
+    of one or more selected rows. The animal rows are added to Firebird's
+    `postprocessing_qc/approved_results_latest.csv`.
+15. Use **Mark selected for IDtracker rerun** when you want to type a detailed
+    reason. The rapid-review `R` key instead writes the standard reason
+    `Rapid PDF QC marked for IDtracker rerun` so hundreds of PDFs can be reviewed
+    quickly. Both paths update `sessions_marked_rerun_latest.csv`; neither path
+    runs or alters IDtracker.
+16. Click **Export approved spreadsheet and PDFs** to create a dated local review
+    package containing the approved-results CSV, the rerun-report CSV, and copies
+    of all approved PDFs.
 
 Reusable JSON files default to
 `~/Downloads/IDtracker_postprocessing_results/saved_settings/`. They store the
@@ -431,10 +446,9 @@ appends the settings filename and restoration timestamp to its provenance.
 
 An IDtracker session being present, complete, previously approved by the old
 pipeline, or newest does not make its post-processing result scientifically
-approved. In version 0.8.0, approval comes only from the explicit
-**Approve selected processed session(s)** action in this GUI. Newest-run
-selection determines which duplicate can be reviewed; it is not itself an
-approval.
+approved. In version 0.8.1, approval comes only from the explicit
+Post-processing QC approval actions in this GUI. Newest-run selection
+determines which duplicate can be reviewed; it is not itself an approval.
 
 For the current prototype phase, each selected session writes a uniquely keyed
 per-session CSV. A completed batch
@@ -700,3 +714,12 @@ while it remains open.
 **Direct SSH (small test only)** remains available for a few examples. The
 combined CSV records `processing_execution_mode` as `SLURM_ARRAY` or
 `DIRECT_SSH`.
+The **Export approved spreadsheet and PDFs** button creates a timestamped local
+folder under
+`~/Downloads/IDtracker_postprocessing_results/postprocessing_qc/qc_review_export_YYYYMMDD_HHMMSS_microseconds/`.
+It downloads the current Firebird `approved_results_latest.csv` and
+`sessions_marked_rerun_latest.csv` using the same timestamp in the local
+filenames, then copies approved PDFs from the cached completed-run `pdfs/`
+folder into `approved_pdfs/`. If an approved PDF is not present in the local
+cache, the export writes `approved_pdf_copy_warnings.txt` instead of silently
+pretending the PDF was copied.

@@ -1167,6 +1167,10 @@ class App(tk.Tk):
         self.duplicate_rows = {}
         self.qc_state = {}
         self.last_completed_local_folder = ""
+        self.qc_pdf_cache = {}
+        self.qc_rapid_review_active = False
+        self.qc_pending_advance = False
+        self.qc_last_reviewed_record_id = ""
         self.jump_audit_summaries = []
         self.jump_audit_tracks = []
         self.jump_audit_rows = {}
@@ -1813,34 +1817,44 @@ class App(tk.Tk):
         controls.pack(fill="x", padx=6, pady=6)
         ttk.Button(
             controls,
+            text="Start rapid review",
+            command=self.start_rapid_postprocessing_review,
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=3)
+        ttk.Button(
+            controls,
             text="Approve selected processed session(s)",
             command=self.approve_postprocessing_sessions,
-        ).grid(row=0, column=0, sticky="w", padx=4, pady=3)
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=3)
         ttk.Button(
             controls,
             text="Mark selected for IDtracker rerun",
             command=self.rerun_postprocessing_sessions,
-        ).grid(row=0, column=1, sticky="w", padx=4, pady=3)
+        ).grid(row=0, column=2, sticky="w", padx=4, pady=3)
         ttk.Button(
             controls,
             text="Open selected downloaded PDF",
             command=self.open_selected_qc_pdf,
-        ).grid(row=0, column=2, sticky="w", padx=4, pady=3)
+        ).grid(row=1, column=0, sticky="w", padx=4, pady=3)
         ttk.Button(
             controls,
             text="Return selected to unreviewed",
             command=self.unreview_postprocessing_sessions,
-        ).grid(row=1, column=0, sticky="w", padx=4, pady=3)
+        ).grid(row=1, column=1, sticky="w", padx=4, pady=3)
         ttk.Button(
             controls,
             text="Download approved data file",
             command=self.download_approved_results,
-        ).grid(row=1, column=1, sticky="w", padx=4, pady=3)
+        ).grid(row=2, column=0, sticky="w", padx=4, pady=3)
         ttk.Button(
             controls,
             text="Download rerun report",
             command=self.download_rerun_report,
-        ).grid(row=1, column=2, sticky="w", padx=4, pady=3)
+        ).grid(row=2, column=1, sticky="w", padx=4, pady=3)
+        ttk.Button(
+            controls,
+            text="Export approved spreadsheet and PDFs",
+            command=self.export_qc_review_package,
+        ).grid(row=2, column=2, sticky="w", padx=4, pady=3)
         controls.columnconfigure(3, weight=1)
         self.qc_status = tk.StringVar(
             value=(
@@ -1911,6 +1925,11 @@ class App(tk.Tk):
             yscrollcommand=qc_y.set, xscrollcommand=qc_x.set
         )
         self.qc_table.grid(row=0, column=0, sticky="nsew")
+        self.qc_table.bind("<space>", self._qc_space_key)
+        self.qc_table.bind("<KeyPress-a>", self._qc_approve_key)
+        self.qc_table.bind("<KeyPress-A>", self._qc_approve_key)
+        self.qc_table.bind("<KeyPress-r>", self._qc_rerun_key)
+        self.qc_table.bind("<KeyPress-R>", self._qc_rerun_key)
         qc_y.grid(row=0, column=1, sticky="ns")
         qc_x.grid(row=1, column=0, sticky="ew")
         qc_frame.rowconfigure(0, weight=1)
@@ -2072,6 +2091,7 @@ class App(tk.Tk):
             while True:
                 kind, payload = self.work.get_nowait()
                 if kind == "error":
+                    self.qc_pending_advance = False
                     messagebox.showerror("Operation stopped", payload)
                     self.status.set("Stopped with an error; no result was silently accepted.")
                 elif kind == "status":
@@ -2139,7 +2159,22 @@ class App(tk.Tk):
                         f"{payload['folder']}"
                     )
                     self.last_completed_local_folder = payload["folder"]
+                    self._index_qc_pdf_cache()
                     self._download_completion_alert(payload)
+                elif kind == "qc_export_complete":
+                    self._play_completion_sound()
+                    messagebox.showinfo(
+                        "QC export complete",
+                        "Approved spreadsheet, rerun report, and approved PDF "
+                        "copies were saved.\n\n"
+                        f"Approved PDFs copied: {payload['approved_pdfs']}\n"
+                        f"Missing cached PDFs: {payload['missing_pdfs']}\n\n"
+                        f"Folder:\n{payload['folder']}",
+                    )
+                    self.status.set(
+                        "Post-processing QC export saved to "
+                        + payload["folder"]
+                    )
                 elif kind == "auto_download_failed":
                     self.auto_download_in_progress = False
                     self.download_button.configure(state="normal")
@@ -2695,43 +2730,176 @@ class App(tk.Tk):
             if item in self.qc_rows
         ]
 
-    def open_selected_qc_pdf(self):
-        records = self._selected_qc_records()
-        if len(records) != 1:
-            messagebox.showinfo(
-                "Select one session",
-                "Select exactly one session in Post-processing QC.",
-            )
-            return
+    def _index_qc_pdf_cache(self):
+        self.qc_pdf_cache = {}
         if not self.last_completed_local_folder:
-            messagebox.showinfo(
-                "Download not available",
-                "Process and finish the automatic CSV/PDF download first.",
-            )
             return
-        remote_plot = str(records[0].get("plot_file") or "")
+        pdf_folder = Path(self.last_completed_local_folder) / "pdfs"
+        if not pdf_folder.is_dir():
+            return
+        self.qc_pdf_cache = {
+            path.name: path for path in sorted(pdf_folder.glob("*.pdf"))
+        }
+
+    def _local_pdf_for_record(self, record):
+        if not self.qc_pdf_cache:
+            self._index_qc_pdf_cache()
+        remote_plot = str(record.get("plot_file") or "")
         if not remote_plot:
-            messagebox.showinfo(
-                "No processed PDF",
-                "This session does not have a PDF from the current run.",
-            )
-            return
-        pdf = (
-            Path(self.last_completed_local_folder)
-            / "pdfs"
-            / PurePosixPath(remote_plot).name
-        )
-        if not pdf.is_file():
-            messagebox.showerror(
-                "Downloaded PDF not found",
-                "The expected PDF was not found in the latest completed "
-                f"download:\n\n{pdf}",
-            )
-            return
+            return None
+        return self.qc_pdf_cache.get(PurePosixPath(remote_plot).name)
+
+    def _open_local_pdf(self, pdf):
         if sys.platform == "darwin":
             subprocess.Popen(["open", str(pdf)])
         else:
             messagebox.showinfo("PDF location", str(pdf))
+
+    def open_selected_qc_pdf(self, quiet=False):
+        records = self._selected_qc_records()
+        if len(records) != 1:
+            if not quiet:
+                messagebox.showinfo(
+                    "Select one session",
+                    "Select exactly one session in Post-processing QC.",
+                )
+            return
+        if not self.last_completed_local_folder:
+            if not quiet:
+                messagebox.showinfo(
+                    "Download not available",
+                    "Process and finish the automatic CSV/PDF download first.",
+                )
+            return
+        if not str(records[0].get("plot_file") or ""):
+            if not quiet:
+                messagebox.showinfo(
+                    "No processed PDF",
+                    "This session does not have a PDF from the current run.",
+                )
+            return
+        pdf = self._local_pdf_for_record(records[0])
+        if pdf is None or not pdf.is_file():
+            if not quiet:
+                messagebox.showerror(
+                    "Downloaded PDF not found",
+                    "The expected PDF was not found in the latest completed "
+                    "download:\n\n"
+                    f"{Path(self.last_completed_local_folder) / 'pdfs'}"
+                )
+            return
+        self._open_local_pdf(pdf)
+
+    def _qc_select_record(self, record):
+        for item, candidate in self.qc_rows.items():
+            if candidate is record:
+                self.qc_table.selection_set(item)
+                self.qc_table.focus(item)
+                self.qc_table.see(item)
+                self.qc_table.focus_set()
+                return True
+        return False
+
+    def _qc_reviewable_records(self):
+        return [
+            self.qc_rows[item]
+            for item in self.qc_table.get_children("")
+            if (
+                item in self.qc_rows
+                and self.qc_rows[item].get("canonical_for_review")
+                and self.qc_rows[item].get("source_result_file")
+                and self.qc_rows[item].get("plot_file")
+            )
+        ]
+
+    def _qc_next_unreviewed_record(self, after_record_id=""):
+        records = self._qc_reviewable_records()
+        if not records:
+            return None
+        start = 0
+        if after_record_id:
+            for index, record in enumerate(records):
+                if (
+                    str(record.get("session_record_id") or "")
+                    == after_record_id
+                ):
+                    start = index + 1
+                    break
+        for offset in range(len(records)):
+            record = records[(start + offset) % len(records)]
+            if record.get("postprocessing_qc_decision") == "UNREVIEWED":
+                return record
+        return None
+
+    def start_rapid_postprocessing_review(self):
+        self._index_qc_pdf_cache()
+        if not self.qc_pdf_cache:
+            messagebox.showinfo(
+                "PDF cache not ready",
+                "Process sessions and let the automatic PDF download finish "
+                "before rapid review.",
+            )
+            return
+        self.notebook.select(self.qc_tab)
+        self.qc_rapid_review_active = True
+        record = self._qc_next_unreviewed_record()
+        if not record:
+            messagebox.showinfo(
+                "Rapid review complete",
+                "No unreviewed processed newest sessions are available.",
+            )
+            return
+        self._qc_select_record(record)
+        self.open_selected_qc_pdf(quiet=True)
+        self.status.set(
+            "Rapid review: space opens the PDF, A approves, R marks rerun, "
+            "then the next unreviewed PDF opens."
+        )
+
+    def _qc_space_key(self, _event=None):
+        self.open_selected_qc_pdf(quiet=True)
+        return "break"
+
+    def _qc_approve_key(self, _event=None):
+        records = self._selected_qc_records()
+        if len(records) != 1:
+            self.status.set("Rapid review needs exactly one selected QC row.")
+            return "break"
+        self._record_postprocessing_decisions(
+            records,
+            "APPROVED",
+            "Rapid PDF QC approved post-processing PDF and result",
+            advance_after=True,
+        )
+        return "break"
+
+    def _qc_rerun_key(self, _event=None):
+        records = self._selected_qc_records()
+        if len(records) != 1:
+            self.status.set("Rapid review needs exactly one selected QC row.")
+            return "break"
+        self._record_postprocessing_decisions(
+            records,
+            "RERUN",
+            "Rapid PDF QC marked for IDtracker rerun",
+            advance_after=True,
+        )
+        return "break"
+
+    def _qc_advance_after_decision(self):
+        record = self._qc_next_unreviewed_record(
+            self.qc_last_reviewed_record_id
+        )
+        if not record:
+            self.qc_rapid_review_active = False
+            self._play_completion_sound()
+            messagebox.showinfo(
+                "Rapid review complete",
+                "No unreviewed processed newest sessions remain in the QC tab.",
+            )
+            return
+        self._qc_select_record(record)
+        self.open_selected_qc_pdf(quiet=True)
 
     def _qc_event_for_record(self, record, decision, reason):
         now = datetime.now().astimezone().isoformat(timespec="seconds")
@@ -2784,8 +2952,32 @@ class App(tk.Tk):
         }
 
     def _record_postprocessing_decisions(
-        self, records, decision, reason
+        self, records, decision, reason, advance_after=False
     ):
+        invalid = [
+            record for record in records
+            if not record.get("canonical_for_review")
+            or (
+                decision == "APPROVED"
+                and not record.get("source_result_file")
+            )
+        ]
+        if invalid:
+            messagebox.showerror(
+                "QC decision requires newest processed runs",
+                "Every rapid QC decision must target a newest duplicate. "
+                "Approvals also require a completed per-session result:\n\n"
+                + "\n".join(
+                    f"{record.get('video')} / {record.get('cell_label')}"
+                    for record in invalid
+                ),
+            )
+            return
+        if advance_after and len(records) == 1:
+            self.qc_pending_advance = True
+            self.qc_last_reviewed_record_id = str(
+                records[0].get("session_record_id") or ""
+            )
         events = [
             self._qc_event_for_record(record, decision, reason)
             for record in records
@@ -2827,6 +3019,7 @@ class App(tk.Tk):
                     "state": state,
                     "decision": decision,
                     "record_count": len(records),
+                    "advance_after": advance_after,
                 },
             ))
 
@@ -2942,6 +3135,14 @@ class App(tk.Tk):
             )
             return
         self.notebook.select(self.qc_tab)
+        if payload.get("advance_after") or self.qc_pending_advance:
+            self.qc_pending_advance = False
+            self.status.set(
+                f"Recorded {payload.get('decision')} decision. "
+                "Opening the next unreviewed PDF."
+            )
+            self._qc_advance_after_decision()
+            return
         self._play_completion_sound()
         messagebox.showinfo(
             "Post-processing QC updated",
@@ -2995,6 +3196,101 @@ class App(tk.Tk):
         self._download_qc_file(
             "rerun_path", "sessions_marked_for_idtracker_rerun"
         )
+
+    def export_qc_review_package(self):
+        approved_remote = str(self.qc_state.get("approved_path") or "")
+        rerun_remote = str(self.qc_state.get("rerun_path") or "")
+        if not approved_remote or not rerun_remote:
+            messagebox.showinfo(
+                "Run recursive scan first",
+                "Scan sessions first so the current QC-state paths can be "
+                "loaded from Firebird.",
+            )
+            return
+        if not self.last_completed_local_folder:
+            messagebox.showinfo(
+                "PDF cache not ready",
+                "Process sessions and let the automatic CSV/PDF download finish "
+                "before exporting approved PDF copies.",
+            )
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        destination = (
+            self._qc_download_folder() / f"qc_review_export_{stamp}"
+        )
+        approved_csv = (
+            destination / f"approved_postprocessing_results_{stamp}.csv"
+        )
+        rerun_csv = (
+            destination / f"sessions_marked_for_idtracker_rerun_{stamp}.csv"
+        )
+        pdf_destination = destination / "approved_pdfs"
+
+        def action():
+            try:
+                destination.mkdir(parents=True, exist_ok=False)
+                pdf_destination.mkdir()
+                self.ssh().download(
+                    approved_remote, str(approved_csv), timeout=900
+                )
+                self.ssh().download(
+                    rerun_remote, str(rerun_csv), timeout=900
+                )
+                self._index_qc_pdf_cache()
+                approved_records = [
+                    record for record in self.all_records
+                    if record.get("postprocessing_qc_decision") == "APPROVED"
+                    and record.get("canonical_for_review")
+                ]
+                copied = 0
+                missing = []
+                for record in approved_records:
+                    pdf = self._local_pdf_for_record(record)
+                    if pdf is None or not pdf.is_file():
+                        missing.append(
+                            f"{record.get('video')} / "
+                            f"{record.get('cell_label')}"
+                        )
+                        continue
+                    target = pdf_destination / pdf.name
+                    if target.exists():
+                        target = (
+                            pdf_destination
+                            / (
+                                str(record.get("session_record_id") or "run")
+                                + "__"
+                                + pdf.name
+                            )
+                        )
+                    shutil.copy2(pdf, target)
+                    copied += 1
+                if missing:
+                    (destination / "approved_pdf_copy_warnings.txt").write_text(
+                        "Approved records without a cached local PDF copy:\n"
+                        + "\n".join(missing)
+                        + "\n",
+                        encoding="utf-8",
+                    )
+                    for item in missing:
+                        self.log(f"QC EXPORT WARNING: missing approved PDF {item}")
+                self.log(
+                    f"Exported QC review package: {destination}; "
+                    f"{copied} approved PDF(s) copied."
+                )
+                self.work.put((
+                    "qc_export_complete",
+                    {
+                        "folder": str(destination),
+                        "approved_pdfs": copied,
+                        "missing_pdfs": len(missing),
+                    },
+                ))
+            except Exception:
+                if destination.exists():
+                    shutil.rmtree(destination)
+                raise
+
+        self._background(action)
 
     def export_duplicate_report(self):
         rows = make_duplicate_report(self.all_records)

@@ -1,6 +1,6 @@
 # IDtracker post-processing data dictionary
 
-Version documented: **0.8.0**
+Version documented: **0.8.1**
 
 This document defines every column written by the standalone IDtracker
 post-processing prototype. It covers:
@@ -124,7 +124,7 @@ animal statistical tables.
 
 | Column | Type / units | Applies | Definition and interpretation | Example |
 |---|---|---|---|---|
-| `script_version` | semantic-version text | all rows | Exact standalone processor version that generated the row. Results from different versions must not be assumed to share a schema or definition. | `0.8.0` |
+| `script_version` | semantic-version text | all rows | Exact standalone processor version that generated the row. Results from different versions must not be assumed to share a schema or definition. | `0.8.1` |
 | `analysis_start_frame` | integer global frame | all rows | Final positive researcher-reviewed global frame used as the inclusive analysis start. Zero is rejected as a data-entry error. | `760` |
 | `analysis_timespan_frames` | integer frame intervals | all rows | Requested difference between inclusive end and start. The default is 7200 intervals, not 7200 observations. | `7200` |
 | `analysis_end_frame_inclusive` | integer global frame | all rows | Inclusive end, calculated as `analysis_start_frame + analysis_timespan_frames`. | `7960` |

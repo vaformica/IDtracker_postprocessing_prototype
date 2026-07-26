@@ -13,7 +13,7 @@ table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8
 </style>
 </head>
 <body>
-<h1>Standalone IDtracker.ai post-processing: version 0.8.0</h1>
+<h1>Standalone IDtracker.ai post-processing: version 0.8.1</h1>
 <p>This document describes every calculation performed by <code>processor.py</code>.
 The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
 
@@ -84,7 +84,7 @@ differ from the current 200-pixel default. The completion dialog states the
 loaded threshold so the researcher can review it before processing.</p>
 
 <h2>Recursive discovery, independent post-processing QC, and repeats</h2>
-<p>Version 0.8.0 deliberately separates IDtracker execution QC from
+<p>Version 0.8.1 deliberately separates IDtracker execution QC from
 post-processing QC. The recursive scanner does <strong>not</strong> read
 <code>QC/run_status.csv</code> and does not require a prior pipeline approval.
 It examines every supported IDtracker trajectory under the Firebird folders
@@ -118,8 +118,16 @@ Every click writes a new append-only event; earlier decisions are not erased.
 When a newer duplicate appears, an older approval is not carried forward. The
 new run begins unreviewed and the approved data file is rebuilt using only
 current rank-1 sessions whose latest decision is <code>APPROVED</code>.</p>
-<p>A <code>RERUN</code> decision requires a human-entered reason and is written
-to <code>sessions_marked_rerun_latest.csv</code>. It does not run IDtracker or
+<p>The rapid-review QC mode operates only on rank-1 processed runs. It opens
+cached local PDFs from the completed Mac download folder. While the QC table is
+focused, the spacebar reopens the selected PDF, <code>A</code> writes an
+<code>APPROVED</code> event, and <code>R</code> writes a <code>RERUN</code>
+event with the standard reason
+<code>Rapid PDF QC marked for IDtracker rerun</code>. After either key, the GUI
+loads the next unreviewed processed PDF. The slower rerun button remains
+available when a custom human-entered reason is needed.</p>
+<p>A <code>RERUN</code> decision is written to
+<code>sessions_marked_rerun_latest.csv</code>. It does not run IDtracker or
 modify its files. An <code>APPROVED</code> decision requires an existing
 per-session processor CSV and adds its animal rows to
 <code>approved_results_latest.csv</code>. Both files and the append-only
@@ -706,6 +714,13 @@ hidden <code>.partial</code> completed-run folder, which is renamed to its
 visible final name only after the CSV and every expected PDF are present. The
 final chime and popup occur after this local rename, not merely after SLURM
 finishes.</p>
+<p>The post-processing QC export creates a separate timestamped folder under
+<code>~/Downloads/IDtracker_postprocessing_results/postprocessing_qc/</code>.
+It contains timestamped copies of <code>approved_results_latest.csv</code> and
+<code>sessions_marked_rerun_latest.csv</code>, plus an
+<code>approved_pdfs/</code> folder copied from the cached completed-run PDF
+folder. Missing approved PDF copies are reported in
+<code>approved_pdf_copy_warnings.txt</code>; they are not silently ignored.</p>
 
 <h2>GUI start-review statuses</h2>
 <table>

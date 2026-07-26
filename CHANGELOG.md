@@ -4,6 +4,21 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.8.1 - 2026-07-25
+
+- Added rapid post-processing PDF review controls modeled after the old QC GUI:
+  **Start rapid review**, spacebar opens the cached local PDF, `A` approves, and
+  `R` marks the newest run for IDtracker rerun.
+- Rapid `A` and `R` decisions advance automatically to the next unreviewed
+  processed newest run and open its cached PDF. The mouse rerun button still
+  asks for a detailed reason; rapid `R` writes a standard reason for speed.
+- Added a QC export package under
+  `~/Downloads/IDtracker_postprocessing_results/postprocessing_qc/` containing
+  timestamped approved-results CSV, rerun-report CSV, and copies of approved
+  PDFs in `approved_pdfs/`.
+- Indexed the completed local `pdfs/` folder after automatic download so QC
+  review opens local cached PDFs instead of repeatedly looking up remote files.
+
 ## 0.8.0 - 2026-07-25
 
 - Created the reversible `feature/postprocessing-qc-review` development branch
