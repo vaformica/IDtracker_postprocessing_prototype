@@ -21,8 +21,20 @@ from processor import (
     compute_turtling_candidates,
     filter_jump_artifact_coordinates,
     main,
+    missing_coordinate_pdf_summary,
     validate_trajectory_source,
     write_plot_pdf,
+)
+from postprocessing_qc import (
+    APPROVED_QC_FIELDS,
+    QC_EVENT_FIELDS,
+    RECURSIVE_SESSION_DISCOVERY,
+    REMOTE_QC_STATE,
+    apply_latest_qc_events,
+    deduplicate_discovered_sessions,
+    make_duplicate_report,
+    make_rerun_report,
+    parse_search_roots,
 )
 from jump_audit import audit_manifest
 from combine_results import (
@@ -56,6 +68,281 @@ from firebird_gui import (
 
 
 class ProcessorTests(unittest.TestCase):
+    def test_recursive_postprocessing_qc_deduplicates_without_old_approval(self):
+        records = [
+            {
+                "session_record_id": "OLD",
+                "video": "Camera_1_123_20260701_1200_ACT1.mp4",
+                "cell_label": "A1",
+                "analysis": "ba",
+                "session_run_timestamp": "2026-07-20T12:00:00",
+                "run_timestamp": "2026-07-20 12:05:00",
+                "session": "/sessions/old",
+                "trajectory": "/sessions/old/trajectories.npy",
+            },
+            {
+                "session_record_id": "NEW",
+                "video": "Camera_1_123_20260701_1200_ACT1.mp4",
+                "cell_label": "A1",
+                "analysis": "ba",
+                "session_run_timestamp": "2026-07-21T12:00:00",
+                "run_timestamp": "2026-07-21 12:05:00",
+                "session": "/sessions/new",
+                "trajectory": "/sessions/new/trajectories.npy",
+            },
+            {
+                "session_record_id": "NO_CELL",
+                "video": "Camera_1_123_20260701_1200_ACT1.mp4",
+                "cell_label": "",
+                "analysis": "ba",
+                "session": "/sessions/unknown",
+                "trajectory": "/sessions/unknown/trajectories.npy",
+            },
+            {
+                "session_record_id": "BAD_CELL",
+                "video": "Camera_1_123_20260701_1200_ACT1.mp4",
+                "cell_label": "RERUN",
+                "analysis": "ba",
+                "session": "/sessions/bad_cell",
+                "trajectory": "/sessions/bad_cell/trajectories.npy",
+            },
+        ]
+        annotated = deduplicate_discovered_sessions(records)
+        by_id = {
+            record["session_record_id"]: record for record in annotated
+        }
+        self.assertTrue(by_id["NEW"]["canonical_for_review"])
+        self.assertEqual(
+            by_id["NEW"]["duplicate_status"], "CANONICAL_NEWEST"
+        )
+        self.assertFalse(by_id["OLD"]["canonical_for_review"])
+        self.assertEqual(
+            by_id["OLD"]["duplicate_status"], "SUPERSEDED_DUPLICATE"
+        )
+        self.assertEqual(
+            by_id["NO_CELL"]["duplicate_status"], "IDENTITY_INCOMPLETE"
+        )
+        self.assertEqual(
+            by_id["BAD_CELL"]["duplicate_status"],
+            "IDENTITY_INCOMPLETE",
+        )
+        self.assertEqual(len(make_duplicate_report(annotated)), 2)
+
+    def test_latest_postprocessing_qc_event_is_applied_and_rerun_reported(self):
+        records = deduplicate_discovered_sessions(
+            [
+                {
+                    "session_record_id": "RUN1",
+                    "video": "Camera_1_123_20260701_1200_ACT1.mp4",
+                    "cell_label": "A1",
+                    "analysis": "ba",
+                    "session": "/sessions/run1",
+                    "trajectory": "/sessions/run1/trajectories.npy",
+                }
+            ]
+        )
+        events = [
+            {
+                "session_record_id": "RUN1",
+                "decision_id": "1",
+                "decided_at": "2026-07-25T10:00:00-04:00",
+                "decision": "APPROVED",
+                "reason": "first review",
+            },
+            {
+                "session_record_id": "RUN1",
+                "decision_id": "2",
+                "decided_at": "2026-07-25T10:01:00-04:00",
+                "decision": "RERUN",
+                "reason": "identity swap",
+                "reviewer": "student",
+            },
+        ]
+        apply_latest_qc_events(records, events)
+        self.assertEqual(
+            records[0]["postprocessing_qc_decision"], "RERUN"
+        )
+        report = make_rerun_report(records)
+        self.assertEqual(len(report), 1)
+        self.assertEqual(
+            report[0]["postprocessing_qc_reason"], "identity swap"
+        )
+
+    def test_postprocessing_qc_state_rebuilds_only_current_approved_data(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = root / "one.csv"
+            with source.open("w", newline="", encoding="utf-8") as stream:
+                writer = csv.DictWriter(
+                    stream,
+                    fieldnames=[
+                        "script_version",
+                        "idtracker_animal_id",
+                        "video_year",
+                    ],
+                )
+                writer.writeheader()
+                writer.writerow(
+                    {
+                        "script_version": SCRIPT_VERSION,
+                        "idtracker_animal_id": 0,
+                        "video_year": 2026,
+                    }
+                )
+            event = {
+                field: "" for field in QC_EVENT_FIELDS
+            }
+            event.update(
+                {
+                    "qc_schema_version": 1,
+                    "decision_id": "D1",
+                    "decided_at": "2026-07-25T10:00:00-04:00",
+                    "decision": "APPROVED",
+                    "session_record_id": "RUN1",
+                    "session_key": "video|A1|ba",
+                    "duplicate_rank": 1,
+                    "duplicate_count": 2,
+                    "video": "Camera_1_123_20260701_1200_ACT1.mp4",
+                    "cell_label": "A1",
+                    "analysis_type": "ba",
+                    "source_result_file": str(source),
+                    "script_version": SCRIPT_VERSION,
+                }
+            )
+            request = {
+                "state_dir": str(root / "state"),
+                "event_fields": QC_EVENT_FIELDS,
+                "approved_qc_fields": APPROVED_QC_FIELDS,
+                "canonical_record_ids": ["RUN1"],
+                "events": [event],
+            }
+            completed = subprocess.run(
+                [sys.executable, "-c", REMOTE_QC_STATE],
+                input=json.dumps(request),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            state = json.loads(completed.stdout)
+            self.assertEqual(state["approved_session_count"], 1)
+            self.assertEqual(state["approved_row_count"], 1)
+            with Path(state["approved_path"]).open(
+                newline="", encoding="utf-8"
+            ) as stream:
+                approved = list(csv.DictReader(stream))
+            self.assertEqual(len(approved), 1)
+            self.assertEqual(
+                approved[0]["postprocessing_qc_decision"], "APPROVED"
+            )
+            request["canonical_record_ids"] = ["NEWER_RUN"]
+            request["events"] = []
+            completed = subprocess.run(
+                [sys.executable, "-c", REMOTE_QC_STATE],
+                input=json.dumps(request),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            state = json.loads(completed.stdout)
+            self.assertEqual(state["approved_session_count"], 0)
+            with Path(state["approved_path"]).open(
+                newline="", encoding="utf-8"
+            ) as stream:
+                self.assertEqual(list(csv.DictReader(stream)), [])
+
+    def test_recursive_discovery_reads_all_linked_runs_without_qc_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            session = root / "sessions" / "session_video_1"
+            trajectories = session / "trajectories"
+            trajectories.mkdir(parents=True)
+            np.save(
+                trajectories / "trajectories.npy",
+                np.zeros((10, 1, 2)),
+            )
+            nested_csv = trajectories / "trajectories_csv"
+            nested_csv.mkdir()
+            (nested_csv / "trajectories.csv").write_text(
+                "x,y\n0,0\n", encoding="utf-8"
+            )
+            (session / "session.json").write_text(
+                json.dumps(
+                    {
+                        "video_paths": ["/videos/Camera_1_1_20260701_1200_ACT1.mp4"],
+                        "tracking_intervals": [[12, 100]],
+                        "timers": {
+                            "Tracking session": {
+                                "finish_time": "2026-07-25T09:00:00"
+                            }
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            run = root / "runs" / "attempt_1"
+            run.mkdir(parents=True)
+            (run / "session_path.txt").write_text(
+                str(session), encoding="utf-8"
+            )
+            (run / "run_metadata.json").write_text(
+                json.dumps(
+                    {
+                        "record_id": "RUN1",
+                        "video_filename": "",
+                        "cell_label": "A1",
+                        "analysis_type": "ba",
+                        "run_timestamp": "2026-07-25 09:01:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            completed = subprocess.run(
+                [sys.executable, "-c", RECURSIVE_SESSION_DISCOVERY],
+                input=json.dumps({"roots": [str(root)]}),
+                text=True,
+                capture_output=True,
+                check=True,
+            )
+            result = json.loads(completed.stdout)
+            self.assertEqual(result["session_folders_found"], 1)
+            self.assertEqual(result["metadata_files_found"], 1)
+            self.assertEqual(len(result["records"]), 1)
+            self.assertEqual(result["records"][0]["cell_label"], "A1")
+            self.assertEqual(
+                result["records"][0]["video"],
+                "Camera_1_1_20260701_1200_ACT1.mp4",
+            )
+            self.assertEqual(
+                result["records"][0]["identity_source"],
+                "RUN_METADATA_LINK_SESSION_VIDEO_FALLBACK",
+            )
+            self.assertEqual(
+                result["records"][0]["trajectory_resolution_status"],
+                "IDTRACKER_RAW_NPY",
+            )
+
+    def test_search_roots_and_missing_coordinate_pdf_summary(self):
+        self.assertEqual(
+            parse_search_roots("/one;/two,\n/three;/one"),
+            ["/one", "/two", "/three"],
+        )
+        summary = missing_coordinate_pdf_summary(
+            [
+                {
+                    "idtracker_animal_id": 0,
+                    "analysis_frame_observations_inclusive": 7201,
+                    "missing_coordinate_frames_in_window": 720,
+                },
+                {
+                    "idtracker_animal_id": 1,
+                    "analysis_frame_observations_inclusive": 7201,
+                    "missing_coordinate_frames_in_window": 8,
+                },
+            ]
+        )
+        self.assertEqual(summary["severity"], "NOTICE")
+        self.assertIn("720 / 7,201 (10.00%)", summary["text"])
+
     def test_student_documentation_covers_complete_combined_schema(self):
         repository = Path(__file__).resolve().parents[1]
         dictionary_text = (
@@ -75,6 +362,15 @@ class ProcessorTests(unittest.TestCase):
             expected_fields - documented_fields,
             set(),
             "Every combined-results field must be defined in the data dictionary.",
+        )
+        self.assertEqual(
+            set(APPROVED_QC_FIELDS) - documented_fields,
+            set(),
+            "Every approved-results QC field must be defined.",
+        )
+        self.assertEqual(
+            len(expected_fields | set(APPROVED_QC_FIELDS)),
+            173,
         )
         self.assertIn("DATA_DICTIONARY.md", readme_text)
         self.assertIn(

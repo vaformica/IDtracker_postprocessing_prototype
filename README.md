@@ -38,8 +38,13 @@ shortened casually in analysis code.
 
 The combined CSV is in **long format**:
 
-> One row represents one zero-based IDtracker animal in one approved
+> One row represents one zero-based IDtracker animal in one selected
 > video/cell/analysis session.
+
+The ordinary completed-run CSV contains the sessions processed in that batch,
+which may still be awaiting post-processing QC. The separate
+`approved_results_latest.csv` contains only current newest sessions whose
+latest decision in this GUI is `APPROVED`.
 
 A BA session will normally have one animal row. A Fight session is expected to
 have two rows, one for IDtracker animal 0 and one for IDtracker animal 1. The
@@ -50,34 +55,41 @@ analysis-start frame so that a later, separately audited metadata workflow can
 connect trajectory identity to a beetle library ID.
 
 The same source video can contribute multiple cell sessions. The same
-video/cell/analysis can also have repeated IDtracker runs. The scanner consults
-the authoritative QC table, keeps approved records only, and selects the newest
-approved record for each `(video, cell, analysis)` key. Folder names, TOML
-files, and the mere existence of an IDtracker output are not approval evidence.
+video/cell/analysis can also have repeated IDtracker runs. Version 0.8.0 scans
+all IDtracker sessions under the researcher-entered Firebird roots and does
+not consult the old pipeline approval CSV. Every repeat remains visible, but
+only the deterministic newest run for each `(video, cell, analysis)` key is
+eligible for processing and approval in this program.
 
 ## What the program does
 
-For every selected approved session, the processor:
+For every selected newest eligible session, the processor:
 
-1. resolves the best available IDtracker trajectory file;
-2. requires a positive researcher-reviewed global analysis start;
-3. extracts one inclusive global-frame analysis window;
-4. identifies the first provisional displacement-threshold crossing;
-5. calculates accepted adjacent-frame movement distance without bridging
+1. recursively discovers all IDtracker sessions under the entered roots,
+   preserves every repeat, and marks the newest run for each exact
+   video/cell/analysis key;
+2. resolves the best available IDtracker trajectory file;
+3. requires a positive researcher-reviewed global analysis start;
+4. extracts one inclusive global-frame analysis window;
+5. identifies the first provisional displacement-threshold crossing;
+6. calculates accepted adjacent-frame movement distance without bridging
    missing coordinates or rejected jumps;
-6. classifies centroid frames and movement-segment midpoints relative to the
+7. classifies centroid frames and movement-segment midpoints relative to the
    primary wall buffer;
-7. for fights, classifies the secondary fungus ROI and its inward buffer;
-8. for two-animal fights, screens social proximity, disappearance, and visible
+8. for fights, classifies the secondary fungus ROI and its inward buffer;
+9. for two-animal fights, screens social proximity, disappearance, and visible
    return interactions;
-9. screens provisional tight-loop trajectory patterns that may warrant video
+10. screens provisional tight-loop trajectory patterns that may warrant video
    review for turtling;
-10. repeats the post-wake movement/location summaries for both the remaining
+11. repeats the post-wake movement/location summaries for both the remaining
     wake-through-end interval and a fixed 3600-frame-interval comparison;
-11. writes one CSV row per tracked animal and one multipage audit PDF per
+12. writes one CSV row per tracked animal and one multipage audit PDF per
     session;
-12. combines only complete session outputs and atomically downloads the CSV and
-    verified PDF collection to the Mac.
+13. combines only complete session outputs and atomically downloads the CSV and
+    verified PDF collection to the Mac; and
+14. records independent `UNREVIEWED`, `APPROVED`, or `RERUN` decisions,
+    rebuilding the approved-data and rerun-report CSVs without modifying
+    IDtracker.
 
 ## What the program deliberately does not do
 
@@ -158,6 +170,11 @@ silently changing the larger production QC pipeline.
 - **v0.7.2:** added this expanded student guide and a field-by-field data
   dictionary covering all 165 columns in the combined results. Scientific
   calculations, the output schema, and PDF content did not change.
+- **v0.8.0:** separated IDtracker execution QC from post-processing QC,
+  replaced old-approval scanning with recursive all-session discovery, retained
+  and ranked duplicates, added append-only approve/rerun decisions and an
+  authoritative approved-results file, and placed missing-coordinate counts
+  and percentages prominently on PDF page 1.
 
 The changelog is authoritative for the detailed release record. Older output
 files remain scientifically tied to the `script_version` written in each row;
@@ -332,12 +349,18 @@ connection form. Its default is
 `~/miniconda3/envs/idtracker_reprocess_v1/bin/python`. Tkinter is required only
 on the Mac.
 
-The interface is divided into five tabs:
+The interface is divided into seven tabs:
 
 - **Setup & Run** contains the SSH connection, scientific parameters, process
   settings, and Firebird execution settings.
-- **Sessions** contains the full approved-session table, filters, start-time
-  tools, process button, and trajectory report.
+- **Sessions & Starts** contains every recursively discovered run, filters,
+  start-time tools, process button, trajectory status, independent QC status,
+  and duplicate status.
+- **Post-processing QC** contains the newest eligible run for each
+  video/cell/analysis key and the Approve, Rerun, Unreview, PDF-open, and
+  report-download controls.
+- **Duplicates** preserves every repeated run and explains which run was
+  selected as rank 1.
 - **Results & Downloads** reports automatic-download progress and contains
   manual CSV/PDF recovery buttons.
 - **Jump Audit** contains video-level BA and fight disturbance results and the
@@ -349,18 +372,26 @@ Workflow:
 1. Optionally click **Load previous settings or results**. The loader accepts a
    reusable JSON settings bundle, a prior combined-results CSV, or a Jump Audit
    video-summary CSV. Loading before a scan queues saved start decisions for
-   exact matching after the approved-session scan.
-2. Enter the Firebird pipeline project root. The default is
-   `/data/labs/vformic1-swat-lab/idtracker_pipeline_runs`.
-3. Scan. This is read-only. Approval comes only from
-   `QC/run_status.csv`, where `qc_decision` is `APPROVED` or legacy `DONE`.
-4. Repeated approved records are grouped by `(video, cell, analysis)`. Only the
-   greatest `date_run` is retained; `run_index` and metadata path break ties.
+   exact matching after recursive discovery.
+2. Enter one or more Firebird search roots, separated by semicolons. The
+   default pipeline-runs root is useful because its run metadata supplies cell
+   identity. Add actual 2025/2026 IDtracker session roots when you want bare
+   sessions included as well.
+3. Click **Recursively find all sessions**. This is read-only. The scanner does
+   not read or obey `QC/run_status.csv`: every linked or bare IDtracker session
+   found under the entered roots is inventoried.
+4. Repeated runs are grouped by `(video, cell, analysis)`. Every run remains in
+   the Duplicates tab; only deterministic rank 1 is eligible. A bare
+   `session.json` usually lacks the experimental cell, so a session with no
+   linked cell metadata is retained as `IDENTITY_INCOMPLETE` and is never
+   processed under a guessed identity. A blank run-metadata video may be
+   recovered directly from that canonical session's `video_paths[0]`; cell
+   labels must still match an uppercase letter followed by digits.
 5. Review the detected interval for every selected session.
 6. Correct missing, ambiguous, or zero starts with **Edit selected start frame**.
    Alternatively, use **Export sessions needing start times**, fill only
    `enter_start_global_frame`, and use **Import completed start-time CSV**.
-7. Click **Audit jumps in all approved BA + fights**. Review any video-wide
+7. Click **Audit jumps in all newest BA + fights**. Review any video-wide
    disturbance recommendation in the Jump Audit tab. No start changes until
    you select a video and click **Approve selected start recommendation**.
 8. Click **Save current settings and decisions** after start and Jump Audit
@@ -375,6 +406,15 @@ Workflow:
 11. Process. After successful remote completion, leave the GUI open while it
     automatically downloads and verifies the timestamped CSV/PDF folder. The
     final chime and popup identify the completed Mac folder.
+12. In **Post-processing QC**, open and review the selected downloaded PDF.
+    Page 1 shows the video, cell, and large missing-coordinate count and
+    percentage for every IDtracker animal.
+13. Click **Approve selected processed session(s)** only when the
+    post-processing output is suitable. The animal rows are added to
+    Firebird's `postprocessing_qc/approved_results_latest.csv`.
+14. If IDtracker should be rerun or its settings changed, click **Mark selected
+    for IDtracker rerun** and enter an actionable reason. This updates
+    `sessions_marked_rerun_latest.csv`; it does not run or alter IDtracker.
 
 Reusable JSON files default to
 `~/Downloads/IDtracker_postprocessing_results/saved_settings/`. They store the
@@ -384,22 +424,27 @@ video CSV also loads its sibling track CSV when available; only rows explicitly
 marked `APPROVED` restore video-wide starts. Pending recommendations are shown
 but never applied. A separately loaded Jump Audit supplements previously queued
 combined-CSV decisions rather than discarding them. Matching first uses the
-exact QC record ID and then the exact
-`(video, cell, analysis)` key when an approved run has been replaced. Unmatched
+exact discovered session record ID and then the exact
+`(video, cell, analysis)` key when a run has been replaced. Unmatched
 or ambiguous records are logged and are never guessed. Every restored start
 appends the settings filename and restoration timestamp to its provenance.
 
-A successful or collected run is never treated as scientifically approved
-unless the authoritative QC table marks it approved. Folder names and TOML
-locations are not approval evidence.
+An IDtracker session being present, complete, previously approved by the old
+pipeline, or newest does not make its post-processing result scientifically
+approved. In version 0.8.0, approval comes only from the explicit
+**Approve selected processed session(s)** action in this GUI. Newest-run
+selection determines which duplicate can be reviewed; it is not itself an
+approval.
 
-For the current prototype phase, each selected session atomically replaces its
-canonical `processed_result_latest.csv`. A completed batch
+For the current prototype phase, each selected session writes a uniquely keyed
+per-session CSV. A completed batch
 atomically replaces `combined_results_latest.csv`, containing all
 individual rows plus QC
 record, video, cell, analysis type, camera, recording date, recording time,
 ACT, processing batch/time, and source-result provenance. Use
-**Download combined CSV** to save that batch file on the Mac. The original
+**Download combined CSV** to save that not-yet-QC-approved batch file on the
+Mac. Download the independent approved data file from the Post-processing QC
+tab. The original
 complete file remains intact if a replacement calculation fails; partial files
 are cleaned up and never become the canonical result. The full calculation specification is in
 `METHODS.html`. Proposed Kiran-analysis variables and remaining definition
@@ -422,11 +467,36 @@ flat `.pdf` archive members, verifies the expected count, extracts them into
 only after both the CSV and verified PDFs are present. The manual recovery
 download buttons are in the separate **Results & Downloads** tab.
 
+### Independent post-processing QC files
+
+The configured Firebird output root contains a separate
+`postprocessing_qc/` folder:
+
+- `postprocessing_qc_decision_history.csv` is append-only. Every approval,
+  rerun, and return-to-unreviewed click creates a new timestamped event with
+  reviewer, reason, session/trajectory paths, duplicate rank, processing batch,
+  and script version.
+- `postprocessing_qc_current.csv` contains the latest decision for every
+  session record.
+- `approved_results_latest.csv` is rebuilt from current rank-1 sessions whose
+  latest decision is exactly `APPROVED`. It contains one row per IDtracker
+  animal and adds eight `postprocessing_qc_*` provenance columns.
+- `sessions_marked_rerun_latest.csv` contains current rank-1 sessions whose
+  latest decision is `RERUN`, including the human-entered reason and paths
+  needed to locate the IDtracker run.
+
+The approved file is rebuilt rather than blindly appended. If an approved
+session is later marked `RERUN` or `UNREVIEWED`, its animal rows leave the
+approved file while the complete history remains. If recursive discovery finds
+a newer duplicate, the earlier approval is not transferred to it: the new run
+must be processed and reviewed on its own.
+
 In the combined CSV, `cell_label`, `video`, and `analysis_type` (fight or BA)
 are deliberately the first three columns. `video_year` is fourth and is parsed
 from the recording date for recognized 2025 and 2026 video names.
 
-The editable missing-start report is keyed by authoritative `qc_record_id`.
+The editable missing-start report is keyed by the discovered
+`session_record_id`, carried in the compatibility-named `qc_record_id` field.
 Import validation is all-or-nothing: duplicate IDs, unknown IDs, non-integers,
 zero, and negative starts reject the entire import before any session changes.
 
@@ -456,11 +526,11 @@ interpolated. The CSV reports `one_frame_jump_threshold_px`,
 `jump_artifact_coordinate_frames_excluded` is zero because this version does
 not delete coordinate frames.
 
-The Jump Audit evaluates all approved BA and fight sessions with usable
+The Jump Audit evaluates all newest eligible BA and fight sessions with usable
 positive start evidence in one
 read-only Firebird pass. A video-wide disturbance requires synchronized jump
-evidence from at least three distinct approved sessions and at least half of
-the available approved sessions for that video. The proposed start is the next
+evidence from at least three distinct newest sessions and at least half of
+the available newest sessions for that video. The proposed start is the next
 50-frame boundary after the final synchronized event, and it is offered only
 when a complete analysis span fits. Cell- or animal-specific jumps do not
 produce a video-level start recommendation.
@@ -584,7 +654,11 @@ overlays so the original track remains visible.
 
 Processing creates one multipage PDF per session under the remote
 `combined_results_latest_pdfs` folder. Every page includes the full video
-filename, cell, accepted trajectory-source category, and QC record provenance.
+filename, cell, accepted trajectory-source category, and discovered session
+record provenance. Page 1 also contains a large boxed
+**MISSING COORDINATES** banner for every animal:
+`missing frames / inclusive frame observations (percentage)`. This is a QC
+display only; it does not change or filter coordinates.
 The GUI automatically transfers those PDFs in one archive after a successful
 run. The **Results & Downloads** tab retains manual CSV and PDF recovery
 buttons. The combined CSV and PDF folder are staged as a complete batch;
@@ -602,7 +676,7 @@ The popup is not emitted for a failed, incomplete, or partial download.
 
 ## SLURM execution for large batches
 
-The GUI defaults to **SLURM job array**. Each checked, approved, processable
+The GUI defaults to **SLURM job array**. Each checked, newest eligible, processable
 session becomes one array task. The default maximum concurrency is 20 tasks;
 this is a scheduler throttle, not a request for 20 CPUs in one task. Each task
 requests one CPU, 4 GB of memory, and two hours. The default account is `swat`;

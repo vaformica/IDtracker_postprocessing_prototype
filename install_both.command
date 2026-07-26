@@ -31,7 +31,10 @@ ssh -o BatchMode=yes -o IdentitiesOnly=yes -i "$ssh_key" "$ssh_host" \
   "mkdir -p '$remote_stage'"
 scp -i "$ssh_key" \
   "$script_dir/processor.py" \
+  "$script_dir/postprocessing_qc.py" \
   "$script_dir/combine_results.py" \
+  "$script_dir/slurm_worker.py" \
+  "$script_dir/slurm_finalize.py" \
   "$script_dir/METHODS.html" \
   "$script_dir/README.md" \
   "$script_dir/DATA_DICTIONARY.md" \

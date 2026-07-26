@@ -26,6 +26,10 @@ This repository is the standalone IDtracker post-processing prototype.
 - `v0.7.2` adds a student-facing provenance guide and a comprehensive
   dictionary for all 165 combined-results fields. Scientific calculations,
   output fields, and PDFs are unchanged.
+- `v0.8.0` separates IDtracker execution QC from this application's recursive
+  post-processing QC, retains and ranks duplicates, builds an independent
+  approved-results data file, writes an actionable rerun report, and adds
+  prominent PDF missing-frame review.
 
-The automated suite contains 58 tests. Firebird execution remains a separate
+The automated suite contains 63 tests. Firebird execution remains a separate
 validation step and is not implied by local test success.

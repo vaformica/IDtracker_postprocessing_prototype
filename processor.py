@@ -18,7 +18,7 @@ from pathlib import Path
 import numpy as np
 
 
-SCRIPT_VERSION = "0.7.2"
+SCRIPT_VERSION = "0.8.0"
 POST_WAKE_FIXED_INTERVALS = 3600
 
 IDTRACKER_TRAJECTORY_SOURCES = {
@@ -2197,6 +2197,32 @@ def analyze(
     return output
 
 
+def missing_coordinate_pdf_summary(rows: list[dict]) -> dict:
+    """Return explicit first-page missing-coordinate QC text and severity."""
+    if not rows:
+        raise ValueError("At least one result row is required")
+    observations = int(rows[0]["analysis_frame_observations_inclusive"])
+    summaries = []
+    percentages = []
+    for row in rows:
+        missing = int(row["missing_coordinate_frames_in_window"])
+        percentage = (
+            100.0 * missing / observations if observations else math.nan
+        )
+        percentages.append(percentage)
+        summaries.append(
+            f"animal {row['idtracker_animal_id']}: "
+            f"{missing:,} / {observations:,} ({percentage:.2f}%)"
+        )
+    maximum = max(percentages) if percentages else 0.0
+    severity = "HIGH" if maximum >= 10 else ("NOTICE" if maximum >= 1 else "LOW")
+    return {
+        "text": "MISSING COORDINATES — " + "    |    ".join(summaries),
+        "maximum_percentage": maximum,
+        "severity": severity,
+    }
+
+
 def write_plot_pdf(
     destination: Path,
     trajectory_file: Path,
@@ -2296,7 +2322,7 @@ def write_plot_pdf(
         f"Script: v{rows[0]['script_version']}"
     )
     if qc_record_id:
-        page_context += f"    |    QC record: {qc_record_id}"
+        page_context += f"    |    Session record: {qc_record_id}"
     identity_lines = (
         textwrap.wrap(
             page_video,
@@ -2318,7 +2344,7 @@ def write_plot_pdf(
     )
     plot_content_top = min(0.93, identity_bottom - 0.018)
 
-    def add_page_identity(fig):
+    def add_page_identity(fig, prominent=False):
         for line_number, line in enumerate(identity_lines):
             fig.text(
                 0.5,
@@ -2326,9 +2352,41 @@ def write_plot_pdf(
                 line,
                 ha="center",
                 va="top",
-                fontsize=9,
+                fontsize=(
+                    13
+                    if prominent and line_number == 0
+                    else (10 if prominent else 9)
+                ),
                 fontweight="bold",
             )
+
+    def add_first_page_missing_banner(fig):
+        summary = missing_coordinate_pdf_summary(rows)
+        if summary["severity"] == "HIGH":
+            facecolor, edgecolor = "#F8D7DA", "#A61B29"
+        elif summary["severity"] == "NOTICE":
+            facecolor, edgecolor = "#FFF3CD", "#9A6700"
+        else:
+            facecolor, edgecolor = "#DDF3E4", "#1B7F3A"
+        banner_y = identity_bottom - 0.028
+        fig.text(
+            0.5,
+            banner_y,
+            summary["text"],
+            ha="center",
+            va="top",
+            fontsize=15,
+            fontweight="bold",
+            color="#111111",
+            bbox={
+                "boxstyle": "round,pad=0.45",
+                "facecolor": facecolor,
+                "edgecolor": edgecolor,
+                "linewidth": 1.5,
+                "alpha": 0.96,
+            },
+        )
+        return banner_y - 0.065
 
     finite_sets = [
         xy[np.isfinite(xy).all(axis=1)] for xy in window_arr.transpose(1, 0, 2)
@@ -2433,7 +2491,10 @@ def write_plot_pdf(
     destination.parent.mkdir(parents=True, exist_ok=True)
     with PdfPages(destination) as pdf:
         fig, ax = plt.subplots(figsize=(8.5, 8.5))
-        add_page_identity(fig)
+        add_page_identity(fig, prominent=True)
+        first_page_content_top = min(
+            plot_content_top, add_first_page_missing_banner(fig)
+        )
         draw_rois_2d(ax)
         for animal, xy in enumerate(window_arr.transpose(1, 0, 2)):
             finite = np.isfinite(xy).all(axis=1)
@@ -2473,7 +2534,7 @@ def write_plot_pdf(
                         label=f"animal {animal} threshold crossing",
                     )
         style_2d(ax, "Both tracks within the inclusive analysis window")
-        fig.tight_layout(rect=[0, 0.08, 1, plot_content_top])
+        fig.tight_layout(rect=[0, 0.08, 1, first_page_content_top])
         pdf.savefig(fig)
         plt.close(fig)
 
@@ -2809,7 +2870,7 @@ def write_plot_pdf(
             f"Post-processing script version: {rows[0]['script_version']}",
             f"Video: {video_name}",
             f"Cell: {cell_label}",
-            f"QC record: {qc_record_id or 'not supplied'}",
+            f"Session record: {qc_record_id or 'not supplied'}",
             f"Canonical session: {session_folder.name}",
             f"Analysis: {analysis_type or 'unspecified'}",
             f"Inclusive global frames: {start} through {end}",

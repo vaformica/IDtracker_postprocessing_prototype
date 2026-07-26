@@ -13,7 +13,7 @@ table{border-collapse:collapse;width:100%} th,td{border:1px solid #bbb;padding:8
 </style>
 </head>
 <body>
-<h1>Standalone IDtracker.ai post-processing: version 0.7.2</h1>
+<h1>Standalone IDtracker.ai post-processing: version 0.8.0</h1>
 <p>This document describes every calculation performed by <code>processor.py</code>.
 The script intentionally performs no other behavioral, geometric, or temporal analyses.</p>
 
@@ -35,7 +35,7 @@ inclusive end frame of 7262. This represents 7200 intervals between frames and
 collected in the appendix at the end of this document.</p>
 
 <h3>Human-approved disturbance adjustment and provenance</h3>
-<p>The Jump Audit examines every approved BA and fight session with usable
+<p>The Jump Audit examines every newest eligible BA and fight session with usable
 positive start evidence and groups evidence by source video. A final approved
 start is preferred. If a video is deliberately held for manual start review,
 one positive, unambiguous detected interval may be used provisionally for the
@@ -70,12 +70,12 @@ when present. Only a video row whose saved <code>decision</code> is exactly
 <code>APPROVED</code> can restore its suggested start; pending recommendations
 remain display-only. Loading a separate Jump Audit CSV supplements any
 previously queued combined-CSV decisions rather than replacing them.</p>
-<p>Saved session starts are matched first by exact authoritative QC record ID.
-If that approved run has since been replaced, the fallback key is the exact
+<p>Saved session starts are matched first by exact discovered session record ID.
+If that run has since been replaced, the fallback key is the exact
 triple <code>(video, cell, analysis)</code>. Approved video-wide Jump Audit
 decisions match the exact video and analysis type. Conflicting or ambiguous
 matches reject the restoration atomically. Unmatched decisions are reported in
-the log rather than guessed. Loading before the authoritative scan queues the
+the log rather than guessed. Loading before recursive discovery queues the
 validated decisions and applies this same matching procedure immediately after
 the scan. Each applied record preserves its earlier provenance and appends the
 settings filename and restoration time.</p>
@@ -83,18 +83,48 @@ settings filename and restoration time.</p>
 differ from the current 200-pixel default. The completion dialog states the
 loaded threshold so the researcher can review it before processing.</p>
 
-<h2>Approved-run and repeated-cell selection</h2>
-<p>The GUI reads the pipeline's authoritative
-<code>QC/run_status.csv</code>. A run is eligible only when
-<code>qc_decision</code> is <code>APPROVED</code> or legacy <code>DONE</code>.
-Folder names, TOML locations, successful completion, and modification times are
-not interpreted as approval.</p>
-<p>Eligible repeats are grouped by the exact triple
-<code>(video, cell, analysis)</code>. The record with the greatest ISO-like
-<code>date_run</code> is retained. If dates tie, the greater
-<code>run_index</code> is retained; the metadata path is the final deterministic
-tie-breaker. The QC record ID, selected run, and source TOML provenance are
-displayed in the GUI.</p>
+<h2>Recursive discovery, independent post-processing QC, and repeats</h2>
+<p>Version 0.8.0 deliberately separates IDtracker execution QC from
+post-processing QC. The recursive scanner does <strong>not</strong> read
+<code>QC/run_status.csv</code> and does not require a prior pipeline approval.
+It examines every supported IDtracker trajectory under the Firebird folders
+entered by the researcher. It also reads every <code>run_metadata.json</code>
+and <code>session_path.txt</code>/<code>session_link.txt</code> found under
+those folders solely to preserve video, cell, analysis, TOML, and session
+identity. These metadata links are not approval evidence.</p>
+<p>A bare IDtracker <code>session.json</code> normally supplies the video but
+not the experimental cell. A bare session with no linked cell/analysis identity
+is retained and reported as <code>IDENTITY_INCOMPLETE</code>; it cannot be
+processed or approved under a guessed cell. Including the corresponding
+pipeline run folder as an additional recursive root usually supplies this
+identity without using its old QC decision.</p>
+<p>If linked run metadata has a blank video field, the scanner may recover the
+video filename from that exact canonical session's
+<code>session.json:video_paths[0]</code>. This is a direct provenance fallback,
+not filename guessing. Cell labels must match one uppercase letter followed by
+one or more digits (for example <code>A1</code> or <code>C12</code>);
+malformed metadata such as <code>ACT1</code> or <code>RERUN</code> remains
+<code>IDENTITY_INCOMPLETE</code>.</p>
+<p>Runs are grouped by the exact
+<code>(normalized video, cell, analysis)</code> key. All repeats remain visible
+in the Duplicates tab. Rank 1 is the only run eligible for processing and
+approval. Ranking is descending by IDtracker session finish timestamp, recorded
+run timestamp, trajectory modification nanoseconds, attempt index, run index,
+session path, and trajectory path. The final path tie-breakers make selection
+deterministic but do not turn a timestamp into biological evidence.</p>
+<p>The separate post-processing decision set is
+<code>UNREVIEWED</code>, <code>APPROVED</code>, or <code>RERUN</code>.
+Every click writes a new append-only event; earlier decisions are not erased.
+When a newer duplicate appears, an older approval is not carried forward. The
+new run begins unreviewed and the approved data file is rebuilt using only
+current rank-1 sessions whose latest decision is <code>APPROVED</code>.</p>
+<p>A <code>RERUN</code> decision requires a human-entered reason and is written
+to <code>sessions_marked_rerun_latest.csv</code>. It does not run IDtracker or
+modify its files. An <code>APPROVED</code> decision requires an existing
+per-session processor CSV and adds its animal rows to
+<code>approved_results_latest.csv</code>. Both files and the append-only
+decision history live under the configured remote output folder's
+<code>postprocessing_qc/</code> directory.</p>
 
 <h2>IDtracker trajectory-source priority</h2>
 <p>The prototype first prefers IDtracker-produced gap-filled files, then uses a
@@ -167,7 +197,7 @@ that diagnostic does not delete coordinates from the processor.</p>
 <p>Jump destination frames are clustered when consecutive destinations are no
 more than four frames apart, equivalent to a ±2-frame synchrony tolerance.
 A cluster is called video-wide only when it affects at least three distinct
-approved session records and at least half of the approved records available
+newest eligible session records and at least half of the eligible records available
 for that video. Requiring distinct sessions prevents the two animals in one
 fight from creating a camera-wide classification by themselves.</p>
 <p>For a video-wide cluster, let <em>G</em> be the final synchronized
@@ -470,7 +500,7 @@ Additional positive and negative examples should be reviewed before using the
 measure for biological inference.</p>
 
 <h2>SLURM batch execution and completeness</h2>
-<p>The default large-batch mode submits one approved, processable session per
+<p>The default large-batch mode submits one newest eligible, processable session per
 SLURM array task. The default throttle is 20 simultaneous tasks. Each task
 requests one CPU, 4 GB of memory, and two hours; the GUI exposes concurrency,
 account, partition, time, and memory before submission. The current Firebird
@@ -514,6 +544,15 @@ only; CSV classification still uses the exact point-to-segment geometry
 described above. Potential turtling paths are shown as thin, semi-transparent,
 dark-red dashed overlays so the original track remains visible. The metadata
 page is deliberately last.</p>
+<p>The first page includes a large boxed
+<strong>MISSING COORDINATES</strong> banner. For each IDtracker animal it shows
+the original missing-coordinate frame count, the complete inclusive observation
+count, and the percentage
+<code>100 × missing_coordinate_frames_in_window /
+analysis_frame_observations_inclusive</code>. The banner is display-only QC:
+it does not filter, substitute, or alter a coordinate. Its color is green below
+1%, amber from 1% through less than 10%, and red at 10% or more. The full video
+filename and cell remain above the banner on page 1 and on every later page.</p>
 <p>The third axis is global frame, not seconds. Lines break at original missing
 coordinates and at every rejected &gt;200-pixel adjacent movement step;
 the prototype does not interpolate across either. Primary and fungus ROI

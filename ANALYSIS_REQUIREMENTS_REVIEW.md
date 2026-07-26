@@ -191,6 +191,36 @@ start blank even if it detects an interval:
 - Camera_2_40359705_20260627_1619_ACT2.mp4
 - Camera_2_40359705_20260628_1604_ACT2.mp4
 
-The scan status reports the total newest-approved sample, how many have a
+The scan status reports the total newest discovered sample, how many have a
 nonzero detected start, how many need manual entry, and how many match this
 collaborator list.
+
+## Independent post-processing QC adopted in v0.8.0
+
+IDtracker execution and post-processing review are now separate tests. The
+post-processing GUI recursively inventories every session and run-metadata link
+under the entered Firebird roots without reading the old pipeline approval
+column. All duplicates remain auditable; only the deterministic newest
+video/cell/analysis run is eligible.
+
+The post-processing decisions are `UNREVIEWED`, `APPROVED`, and `RERUN`.
+Approvals require a completed processor CSV and rebuild the independent
+approved-results data file. Reruns require a human-entered reason and create an
+actionable report for later IDtracker work. No QC decision in this application
+runs IDtracker or modifies raw/session files.
+
+Bare session folders frequently contain the video path but not the experimental
+cell. These are retained as `IDENTITY_INCOMPLETE` and blocked rather than
+assigned a guessed cell. Searching the associated pipeline run-metadata folder
+at the same time supplies cell identity when those historical links exist; its
+old QC decision remains irrelevant.
+
+The page-1 PDF QC banner reports, per animal:
+
+```text
+100 * missing_coordinate_frames_in_window
+    / analysis_frame_observations_inclusive
+```
+
+This display does not alter the existing missing-data, social-substitution, or
+distance calculations.

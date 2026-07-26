@@ -1,21 +1,29 @@
 # IDtracker post-processing data dictionary
 
-Version documented: **0.7.2**
+Version documented: **0.8.0**
 
 This document defines every column written by the standalone IDtracker
 post-processing prototype. It covers:
 
 - the 151-column per-session processor CSV; and
 - the 165-column combined CSV, which adds video, cell, QC, and processing-batch
-  metadata.
+  metadata; and
+- the 173-column independently approved-results CSV, which adds eight
+  `postprocessing_qc_*` decision/provenance fields to the combined schema.
 
-The combined CSV is the normal input for downstream R analysis.
+Use the ordinary combined CSV to inspect a processing batch. Use
+`approved_results_latest.csv` as the normal downstream R input after the new
+post-processing QC workflow is adopted.
 
 ## Table grain
 
 One combined-output row is:
 
-> one zero-based IDtracker animal in one approved video/cell/analysis session.
+> one zero-based IDtracker animal in one selected video/cell/analysis session.
+
+In the independently approved-results file, “selected” is additionally
+restricted to a current duplicate-rank-1 session whose latest post-processing
+decision is `APPROVED`.
 
 A normal BA session generally contributes one row. A normal Fight session
 generally contributes two rows. The two fight rows must not be averaged merely
@@ -77,7 +85,7 @@ These columns are added when complete per-session CSVs are combined.
 | `video` | text | combined CSV | Source video filename recorded by QC. Use the complete value; do not infer identity from a shortened display label. | `Camera_2_40359705_20260701_1336_FIGHT_ACT1.mp4` |
 | `analysis_type` | categorical text | combined CSV | Analysis family supplied by the approved record. Expected values are `ba` and `fight`. Unexpected or blank values must be audited rather than guessed from the filename. | `fight` |
 | `video_year` | four-digit text | combined CSV | Recording year parsed only when the filename contains a recognized 2025 or 2026 recording date. Blank means parsing did not produce an approved year, not that the year is zero. | `2026` |
-| `qc_record_id` | text | combined CSV | Unique identifier of the authoritative approved QC record selected for this session. This is essential provenance for tracing the result back to approval history. | `Camera_2_..._A3_A00001_20260722_073959` |
+| `qc_record_id` | text | combined CSV | Compatibility-named unique record identifier for the recursively discovered session/run association. It may originate in linked run metadata or be a deterministic `SESSION_...` identifier for a bare session. It is not evidence that the old pipeline or this post-processing QC approved the result. | `Camera_2_..._A3_A00001_20260722_073959` |
 | `camera` | text/integer-like | combined CSV | Camera number parsed from a `Camera_<number>_<camera_id>_<date>_<time>` filename pattern. Blank means the name did not match the parser. | `2` |
 | `camera_id` | text/integer-like | combined CSV | Hardware or project camera identifier parsed immediately after the camera number. Keep it as text to preserve the original identifier. | `40359705` |
 | `recording_date` | `YYYYMMDD` text | combined CSV | Eight-digit recording date parsed from the video name. This is the recording date, not the IDtracker processing date. | `20260701` |
@@ -88,11 +96,35 @@ These columns are added when complete per-session CSVs are combined.
 | `processing_execution_mode` | categorical text | combined CSV | Execution route used for the row: normally `SLURM_ARRAY` for large batches or `DIRECT_SSH` for small tests. | `SLURM_ARRAY` |
 | `source_result_file` | remote path text | combined CSV | Exact per-session CSV read by the combiner. It permits reconstruction of which complete session result contributed the row. | `/home/.../results/00042.csv` |
 
+## Independent post-processing QC fields
+
+These eight columns occur in
+`postprocessing_qc/approved_results_latest.csv`. They do not occur in an
+ordinary 165-column completed-batch CSV because batch rows have not necessarily
+been reviewed. An approval applies to the entire session; its two fight-animal
+rows therefore carry the same decision provenance.
+
+| Column | Type / units | Applies | Definition and interpretation | Example |
+|---|---|---|---|---|
+| `postprocessing_qc_decision` | categorical text | approved-results CSV | Latest independent post-processing decision for the session. Every row in the approved file must be exactly `APPROVED`; `UNREVIEWED` and `RERUN` sessions are excluded rather than encoded as biological zeroes. | `APPROVED` |
+| `postprocessing_qc_decided_at` | ISO-8601 text | approved-results CSV | Mac-local timestamp, including UTC offset, when the researcher recorded the approval event. It is neither the video recording time nor the IDtracker run time. | `2026-07-25T14:42:18-04:00` |
+| `postprocessing_qc_reviewer` | text | approved-results CSV | Mac account name recorded as the reviewer provenance. It identifies the account used for the click, not necessarily a verified legal identity or authorship claim. | `vformic1-swat` |
+| `postprocessing_qc_reason` | free text | approved-results CSV | Review note saved with the latest decision. The default approval note states that the researcher reviewed the post-processing PDF and result. A rerun reason appears in the separate rerun report, not the approved data. | `Researcher approved post-processing PDF and result` |
+| `postprocessing_qc_session_record_id` | text | approved-results CSV | Exact recursively discovered run/session identifier to which the decision applies. Approval never transfers automatically to a newer duplicate with a different identifier. | `Camera_2_..._A3_A00001_20260722_073959` |
+| `postprocessing_qc_session_key` | composite text | approved-results CSV | Normalized grouping key `video stem|CELL|analysis` used to identify repeats. This is a software key, not a new biological identifier. | `camera_2_..._act1|A3|ba` |
+| `postprocessing_qc_duplicate_rank` | positive integer | approved-results CSV | Run rank within the exact session key at the latest recursive scan. Approved rows must have rank 1. Rank 1 means newest under the documented deterministic order; it does not by itself mean scientifically good. | `1` |
+| `postprocessing_qc_duplicate_count` | positive integer | approved-results CSV | Number of discovered run records sharing the session key during the scan that established the decision. Values greater than 1 indicate retained duplicate history. | `3` |
+
+The append-only decision history and current rerun report contain additional
+session-level fields—decision ID, session path, trajectory path, run timestamp,
+processing batch, and human rerun reason. Those are QC ledgers, not one-row-per-
+animal statistical tables.
+
 ## Script, analysis window, identity, latency, and total movement
 
 | Column | Type / units | Applies | Definition and interpretation | Example |
 |---|---|---|---|---|
-| `script_version` | semantic-version text | all rows | Exact standalone processor version that generated the row. Results from different versions must not be assumed to share a schema or definition. | `0.7.2` |
+| `script_version` | semantic-version text | all rows | Exact standalone processor version that generated the row. Results from different versions must not be assumed to share a schema or definition. | `0.8.0` |
 | `analysis_start_frame` | integer global frame | all rows | Final positive researcher-reviewed global frame used as the inclusive analysis start. Zero is rejected as a data-entry error. | `760` |
 | `analysis_timespan_frames` | integer frame intervals | all rows | Requested difference between inclusive end and start. The default is 7200 intervals, not 7200 observations. | `7200` |
 | `analysis_end_frame_inclusive` | integer global frame | all rows | Inclusive end, calculated as `analysis_start_frame + analysis_timespan_frames`. | `7960` |

@@ -4,6 +4,43 @@ All notable changes to this standalone scientific prototype are documented
 here. Versions use semantic versioning while the software remains independent
 from the production IDtracker pipeline.
 
+## 0.8.0 - 2026-07-25
+
+- Created the reversible `feature/postprocessing-qc-review` development branch
+  from the tagged v0.7.2 checkpoint.
+- Replaced the old `QC/run_status.csv` approval gate with recursive discovery
+  of every supported IDtracker session and run-metadata link under one or more
+  researcher-entered Firebird roots.
+- Kept IDtracker execution and post-processing review as separate QC layers.
+  Old pipeline decisions are not read as approval evidence.
+- Retained every repeated run, grouped exact video/cell/analysis keys, and
+  deterministically ranked the newest run while displaying older runs in a
+  dedicated Duplicates tab.
+- Added explicit `IDENTITY_INCOMPLETE` handling for bare sessions whose
+  `session.json` cannot supply a cell. Such sessions are retained but never
+  processed under a guessed identity.
+- Added canonical `session.json:video_paths[0]` fallback when linked run
+  metadata has a blank video, while rejecting malformed cell labels that do
+  not match an uppercase letter followed by digits.
+- Added a Post-processing QC tab with append-only `UNREVIEWED`, `APPROVED`, and
+  `RERUN` decisions, mandatory rerun reasons, reversible unreview actions, and
+  PDF-opening/report-download controls.
+- Added Firebird QC ledgers and atomic derived files:
+  `postprocessing_qc_decision_history.csv`,
+  `postprocessing_qc_current.csv`, `approved_results_latest.csv`, and
+  `sessions_marked_rerun_latest.csv`.
+- Rebuilds the approved data from current rank-1 approvals instead of blindly
+  appending. An approval is not transferred when a newer duplicate appears.
+- Added eight `postprocessing_qc_*` provenance columns to the 173-column
+  approved-results schema; the ordinary completed-batch schema remains 165
+  columns.
+- Added a large first-page PDF missing-coordinate banner showing, for every
+  animal, missing frames, inclusive observations, and percentage. Full video
+  and cell identity remain at the top of every PDF page.
+- Added recursive discovery, duplicate ranking, latest-decision, stale
+  approval, approved-file rebuild, rerun-report, search-root, and PDF-banner
+  tests.
+
 ## 0.7.2 - 2026-07-25
 
 - Rewrote the beginning of the README as a student-facing guide explaining

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import csv
+import getpass
 import io
 import json
 import math
@@ -17,6 +18,7 @@ import time
 import zipfile
 from datetime import datetime
 from pathlib import Path, PurePosixPath
+from uuid import uuid4
 import tkinter as tk
 from tkinter import filedialog, messagebox, simpledialog, ttk
 try:
@@ -27,6 +29,19 @@ try:
     import tomlkit
 except ImportError:
     tomlkit = None
+
+from postprocessing_qc import (
+    APPROVED_QC_FIELDS,
+    QC_EVENT_FIELDS,
+    QC_SCHEMA_VERSION,
+    RECURSIVE_SESSION_DISCOVERY,
+    REMOTE_QC_STATE,
+    apply_latest_qc_events,
+    deduplicate_discovered_sessions,
+    make_duplicate_report,
+    make_rerun_report,
+    parse_search_roots,
+)
 
 
 BASE = Path(__file__).resolve().parent
@@ -95,6 +110,41 @@ print(
         }
     )
 )
+"""
+
+REMOTE_RESULT_QC_SUMMARY = r"""
+import csv
+import json
+import sys
+from pathlib import Path
+
+items = json.load(sys.stdin)
+output = []
+for item in items:
+    path = Path(item["source_result_file"])
+    summaries = []
+    if path.is_file():
+        with path.open(newline="", encoding="utf-8-sig") as stream:
+            for row in csv.DictReader(stream):
+                missing = int(row["missing_coordinate_frames_in_window"])
+                observations = int(
+                    row["analysis_frame_observations_inclusive"]
+                )
+                percentage = (
+                    100.0 * missing / observations if observations else 0.0
+                )
+                summaries.append(
+                    f"animal {row['idtracker_animal_id']}: "
+                    f"{missing:,} ({percentage:.2f}%)"
+                )
+    output.append(
+        {
+            "session_record_id": item["session_record_id"],
+            "summary": "; ".join(summaries),
+            "available": path.is_file(),
+        }
+    )
+json.dump(output, sys.stdout)
 """
 
 BATCH_SESSION_RESOLVER = r"""
@@ -803,7 +853,11 @@ def make_missing_start_report(records):
             "source_toml": record["toml"],
         }
         for record in records
-        if not str(record.get("start", "")).strip()
+        if (
+            record.get("canonical_for_review", True)
+            and record.get("session_key", True)
+            and not str(record.get("start", "")).strip()
+        )
     ]
 
 
@@ -829,7 +883,10 @@ def make_missing_trajectory_report(records):
             ),
         }
         for record in records
-        if not record.get("processable")
+        if (
+            record.get("canonical_for_review", True)
+            and not record.get("trajectory")
+        )
     ]
 
 
@@ -1106,6 +1163,10 @@ class App(tk.Tk):
         self.last_processing_summary = {}
         self.all_records = []
         self.filtered_records = []
+        self.qc_rows = {}
+        self.duplicate_rows = {}
+        self.qc_state = {}
+        self.last_completed_local_folder = ""
         self.jump_audit_summaries = []
         self.jump_audit_tracks = []
         self.jump_audit_rows = {}
@@ -1119,11 +1180,15 @@ class App(tk.Tk):
         self.notebook.pack(fill="both", expand=True, padx=10, pady=8)
         self.setup_tab = ttk.Frame(self.notebook)
         self.sessions_tab = ttk.Frame(self.notebook)
+        self.qc_tab = ttk.Frame(self.notebook)
+        self.duplicates_tab = ttk.Frame(self.notebook)
         self.results_tab = ttk.Frame(self.notebook)
         self.jump_audit_tab = ttk.Frame(self.notebook)
         self.logs_tab = ttk.Frame(self.notebook)
         self.notebook.add(self.setup_tab, text="Setup & Run")
-        self.notebook.add(self.sessions_tab, text="Sessions")
+        self.notebook.add(self.sessions_tab, text="Sessions & Starts")
+        self.notebook.add(self.qc_tab, text="Post-processing QC")
+        self.notebook.add(self.duplicates_tab, text="Duplicates")
         self.notebook.add(self.results_tab, text="Results & Downloads")
         self.notebook.add(self.jump_audit_tab, text="Jump Audit")
         self.notebook.add(self.logs_tab, text="Logs & Diagnostics")
@@ -1169,7 +1234,10 @@ class App(tk.Tk):
         fields = [
             ("SSH host", self.host),
             ("SSH private key", self.key),
-            ("Firebird pipeline project root", self.roots),
+            (
+                "Firebird session search root(s); separate with ;",
+                self.roots,
+            ),
             ("Remote output folder", self.output_root),
             ("Installed Firebird Python", self.remote_python),
         ]
@@ -1179,7 +1247,7 @@ class App(tk.Tk):
         connection.columnconfigure(1, weight=1)
         ttk.Button(connection, text="Test SSH", command=self.test_ssh).grid(row=0, column=2, padx=6)
         self.scan_button = ttk.Button(
-            connection, text="Scan approved runs", command=self.scan
+            connection, text="Recursively find all sessions", command=self.scan
         )
         self.scan_button.grid(row=2, column=2, padx=6)
 
@@ -1332,7 +1400,7 @@ class App(tk.Tk):
         ttk.Label(
             execution_controls,
             text=(
-                "SLURM runs one approved session per array task, then combines "
+                "SLURM runs one newest eligible session per array task, then combines "
                 "and promotes results only if every task succeeds."
             ),
         ).grid(
@@ -1392,7 +1460,10 @@ class App(tk.Tk):
         sessions_tab = self.sessions_tab
         logs_tab = self.logs_tab
 
-        filter_bar = ttk.LabelFrame(sessions_tab, text="Find and filter approved sessions")
+        filter_bar = ttk.LabelFrame(
+            sessions_tab,
+            text="Find and filter recursively discovered sessions",
+        )
         filter_bar.grid(row=0, column=0, columnspan=2, sticky="ew", padx=4, pady=4)
         self.search_filter = tk.StringVar()
         self.start_filter = tk.StringVar(value="All start statuses")
@@ -1415,6 +1486,12 @@ class App(tk.Tk):
                 "Manually approved start",
                 "Jump-audit approved start",
                 "No usable trajectory",
+                "Newest eligible only",
+                "Superseded duplicates",
+                "Identity incomplete",
+                "Post-processing QC unreviewed",
+                "Post-processing QC approved",
+                "Post-processing QC rerun",
             ],
             state="readonly",
             width=22,
@@ -1512,7 +1589,7 @@ class App(tk.Tk):
         ).grid(row=0, column=2, sticky="w", padx=4, pady=2)
         self.jump_audit_button = ttk.Button(
             start_file_bar,
-            text="Audit jumps in all approved BA + fights",
+            text="Audit jumps in all newest BA + fights",
             command=self.run_jump_audit,
         )
         self.jump_audit_button.grid(
@@ -1522,13 +1599,16 @@ class App(tk.Tk):
         start_file_bar.columnconfigure(2, weight=1)
 
         columns = (
-            "use", "trajectory_status", "status", "start", "video_name", "camera",
+            "use", "postprocessing_qc_decision", "duplicate_status",
+            "trajectory_status", "status", "start", "video_name", "camera",
             "video_year", "recording_date", "recording_time", "act", "cell_label",
             "analysis", "run_timestamp", "qc_record_id",
         )
         self.table = ttk.Treeview(sessions_tab, columns=columns, show="headings", selectmode="extended")
         labels = {
             "use": "Process?",
+            "postprocessing_qc_decision": "Post-process QC",
+            "duplicate_status": "Duplicate status",
             "trajectory_status": "IDtracker trajectory",
             "status": "Start review",
             "start": "Global start",
@@ -1540,11 +1620,13 @@ class App(tk.Tk):
             "act": "ACT",
             "cell_label": "Cell",
             "analysis": "Analysis",
-            "run_timestamp": "Approved run date",
-            "qc_record_id": "QC record",
+            "run_timestamp": "Run timestamp",
+            "qc_record_id": "Session record",
         }
         widths = {
-            "use": 70, "trajectory_status": 225, "status": 205,
+            "use": 70, "postprocessing_qc_decision": 115,
+            "duplicate_status": 165,
+            "trajectory_status": 225, "status": 205,
             "start": 100, "video_name": 330,
             "camera": 70, "video_year": 65,
             "recording_date": 95, "recording_time": 70,
@@ -1586,11 +1668,13 @@ class App(tk.Tk):
             wraplength=1350,
         ).grid(row=4, column=0, columnspan=2, sticky="ew", padx=6, pady=5)
 
+        self._build_postprocessing_qc_tabs()
+
         audit_controls = ttk.Frame(self.jump_audit_tab)
         audit_controls.pack(fill="x", padx=6, pady=6)
         ttk.Button(
             audit_controls,
-            text="Run audit on all approved BA + fights",
+            text="Run audit on all newest BA + fights",
             command=self.run_jump_audit,
         ).grid(row=0, column=0, sticky="w", padx=4, pady=3)
         ttk.Button(
@@ -1646,7 +1730,7 @@ class App(tk.Tk):
             "current_starts": "Current start(s)",
             "suggested_start_global_frame": "Suggested start",
             "last_synchronized_disturbance_frame": "Last disturbance",
-            "approved_records": "Approved sessions",
+            "approved_records": "Newest sessions",
             "tracks_with_jumps": "Tracks with jumps",
             "persistent_jump_tracks": "Persistent tracks",
             "synchronized_disturbance_clusters": "Video-wide events",
@@ -1724,6 +1808,210 @@ class App(tk.Tk):
         self.status = tk.StringVar(value="Ready. Scanning does not modify Firebird.")
         ttk.Label(self, textvariable=self.status).pack(fill="x", padx=10, pady=6)
 
+    def _build_postprocessing_qc_tabs(self):
+        controls = ttk.Frame(self.qc_tab)
+        controls.pack(fill="x", padx=6, pady=6)
+        ttk.Button(
+            controls,
+            text="Approve selected processed session(s)",
+            command=self.approve_postprocessing_sessions,
+        ).grid(row=0, column=0, sticky="w", padx=4, pady=3)
+        ttk.Button(
+            controls,
+            text="Mark selected for IDtracker rerun",
+            command=self.rerun_postprocessing_sessions,
+        ).grid(row=0, column=1, sticky="w", padx=4, pady=3)
+        ttk.Button(
+            controls,
+            text="Open selected downloaded PDF",
+            command=self.open_selected_qc_pdf,
+        ).grid(row=0, column=2, sticky="w", padx=4, pady=3)
+        ttk.Button(
+            controls,
+            text="Return selected to unreviewed",
+            command=self.unreview_postprocessing_sessions,
+        ).grid(row=1, column=0, sticky="w", padx=4, pady=3)
+        ttk.Button(
+            controls,
+            text="Download approved data file",
+            command=self.download_approved_results,
+        ).grid(row=1, column=1, sticky="w", padx=4, pady=3)
+        ttk.Button(
+            controls,
+            text="Download rerun report",
+            command=self.download_rerun_report,
+        ).grid(row=1, column=2, sticky="w", padx=4, pady=3)
+        controls.columnconfigure(3, weight=1)
+        self.qc_status = tk.StringVar(
+            value=(
+                "Recursively scan and process sessions first. This QC layer is "
+                "independent of the old IDtracker pipeline approvals."
+            )
+        )
+        ttk.Label(
+            self.qc_tab,
+            textvariable=self.qc_status,
+            anchor="w",
+            justify="left",
+            wraplength=1320,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        qc_frame = ttk.Frame(self.qc_tab)
+        qc_frame.pack(fill="both", expand=True, padx=6, pady=(0, 6))
+        qc_columns = (
+            "postprocessing_qc_decision",
+            "processed_status",
+            "missing_summary",
+            "video_name",
+            "cell_label",
+            "analysis",
+            "duplicate_status",
+            "session_run_timestamp",
+            "session_record_id",
+        )
+        self.qc_table = ttk.Treeview(
+            qc_frame,
+            columns=qc_columns,
+            show="headings",
+            selectmode="extended",
+        )
+        qc_labels = {
+            "postprocessing_qc_decision": "QC decision",
+            "processed_status": "Processed output",
+            "missing_summary": "Missing frames",
+            "video_name": "Video",
+            "cell_label": "Cell",
+            "analysis": "Analysis",
+            "duplicate_status": "Duplicate status",
+            "session_run_timestamp": "IDtracker run time",
+            "session_record_id": "Session record",
+        }
+        qc_widths = {
+            "postprocessing_qc_decision": 110,
+            "processed_status": 135,
+            "missing_summary": 190,
+            "video_name": 385,
+            "cell_label": 70,
+            "analysis": 75,
+            "duplicate_status": 165,
+            "session_run_timestamp": 170,
+            "session_record_id": 280,
+        }
+        for column in qc_columns:
+            self.qc_table.heading(column, text=qc_labels[column])
+            self.qc_table.column(
+                column, width=qc_widths[column], anchor="w"
+            )
+        qc_y = ttk.Scrollbar(
+            qc_frame, orient="vertical", command=self.qc_table.yview
+        )
+        qc_x = ttk.Scrollbar(
+            qc_frame, orient="horizontal", command=self.qc_table.xview
+        )
+        self.qc_table.configure(
+            yscrollcommand=qc_y.set, xscrollcommand=qc_x.set
+        )
+        self.qc_table.grid(row=0, column=0, sticky="nsew")
+        qc_y.grid(row=0, column=1, sticky="ns")
+        qc_x.grid(row=1, column=0, sticky="ew")
+        qc_frame.rowconfigure(0, weight=1)
+        qc_frame.columnconfigure(0, weight=1)
+
+        duplicate_controls = ttk.Frame(self.duplicates_tab)
+        duplicate_controls.pack(fill="x", padx=6, pady=6)
+        ttk.Button(
+            duplicate_controls,
+            text="Export duplicate audit CSV",
+            command=self.export_duplicate_report,
+        ).pack(side="left", padx=4)
+        self.duplicate_status_text = tk.StringVar(
+            value=(
+                "All repeated runs remain visible here. Only duplicate rank 1 "
+                "(the newest run) is eligible for processing and approval."
+            )
+        )
+        ttk.Label(
+            self.duplicates_tab,
+            textvariable=self.duplicate_status_text,
+            anchor="w",
+            justify="left",
+            wraplength=1320,
+        ).pack(fill="x", padx=10, pady=(0, 6))
+        duplicate_frame = ttk.Frame(self.duplicates_tab)
+        duplicate_frame.pack(
+            fill="both", expand=True, padx=6, pady=(0, 6)
+        )
+        duplicate_columns = (
+            "duplicate_rank",
+            "duplicate_count",
+            "duplicate_status",
+            "video_name",
+            "cell_label",
+            "analysis",
+            "session_run_timestamp",
+            "run_timestamp",
+            "trajectory_status",
+            "session_record_id",
+            "session",
+        )
+        self.duplicate_table = ttk.Treeview(
+            duplicate_frame,
+            columns=duplicate_columns,
+            show="headings",
+            selectmode="browse",
+        )
+        duplicate_labels = {
+            "duplicate_rank": "Rank",
+            "duplicate_count": "Runs",
+            "duplicate_status": "Selection",
+            "video_name": "Video",
+            "cell_label": "Cell",
+            "analysis": "Analysis",
+            "session_run_timestamp": "Session finish",
+            "run_timestamp": "Recorded run",
+            "trajectory_status": "Trajectory",
+            "session_record_id": "Session record",
+            "session": "Canonical session folder",
+        }
+        duplicate_widths = {
+            "duplicate_rank": 55,
+            "duplicate_count": 55,
+            "duplicate_status": 170,
+            "video_name": 380,
+            "cell_label": 70,
+            "analysis": 75,
+            "session_run_timestamp": 170,
+            "run_timestamp": 160,
+            "trajectory_status": 200,
+            "session_record_id": 275,
+            "session": 560,
+        }
+        for column in duplicate_columns:
+            self.duplicate_table.heading(
+                column, text=duplicate_labels[column]
+            )
+            self.duplicate_table.column(
+                column, width=duplicate_widths[column], anchor="w"
+            )
+        duplicate_y = ttk.Scrollbar(
+            duplicate_frame,
+            orient="vertical",
+            command=self.duplicate_table.yview,
+        )
+        duplicate_x = ttk.Scrollbar(
+            duplicate_frame,
+            orient="horizontal",
+            command=self.duplicate_table.xview,
+        )
+        self.duplicate_table.configure(
+            yscrollcommand=duplicate_y.set,
+            xscrollcommand=duplicate_x.set,
+        )
+        self.duplicate_table.grid(row=0, column=0, sticky="nsew")
+        duplicate_y.grid(row=0, column=1, sticky="ns")
+        duplicate_x.grid(row=1, column=0, sticky="ew")
+        duplicate_frame.rowconfigure(0, weight=1)
+        duplicate_frame.columnconfigure(0, weight=1)
+
     def ssh(self):
         return SSH(self.host.get().strip(), self.key.get().strip())
 
@@ -1790,6 +2078,10 @@ class App(tk.Tk):
                     self.status.set(payload)
                 elif kind == "scan":
                     self.load_scan(payload)
+                elif kind == "qc_state":
+                    self.qc_state = dict(payload)
+                elif kind == "qc_updated":
+                    self.load_postprocessing_qc_update(payload)
                 elif kind == "jump_audit_result":
                     self.load_jump_audit(payload)
                 elif kind == "log":
@@ -1810,6 +2102,14 @@ class App(tk.Tk):
                         self.plot_download_button.configure(state="normal")
                 elif kind == "processing_complete":
                     self.last_processing_summary = dict(payload)
+                    for record in self.all_records:
+                        if (
+                            record.get("processing_batch_id")
+                            == self.current_batch_token
+                            and record.get("source_result_file")
+                        ):
+                            record["processed_status"] = "OUTPUT AVAILABLE"
+                    self._render_postprocessing_qc_tables()
                     self.results_status.set(
                         "Firebird processing is complete. The automatic Mac "
                         "download is still running."
@@ -1838,6 +2138,7 @@ class App(tk.Tk):
                         f"CSV and PDF folder automatically saved on this Mac: "
                         f"{payload['folder']}"
                     )
+                    self.last_completed_local_folder = payload["folder"]
                     self._download_completion_alert(payload)
                 elif kind == "auto_download_failed":
                     self.auto_download_in_progress = False
@@ -1927,13 +2228,15 @@ class App(tk.Tk):
         self.status.set("Diagnostic log copied to the clipboard.")
 
     def run_diagnostics(self):
-        entered_root = self.roots.get().strip()
+        entered_roots = parse_search_roots(self.roots.get())
 
         def action():
             self.log("Starting read-only connection diagnostics.")
             remote_home = self.ssh().run('printf "%s" "$HOME"').strip()
-            project_root = expand_remote_path(entered_root, remote_home).rstrip("/")
-            qc_path = project_root + "/QC/run_status.csv"
+            search_roots = [
+                expand_remote_path(root, remote_home).rstrip("/")
+                for root in entered_roots
+            ]
             remote_python = expand_remote_path(self.remote_python.get(), remote_home)
             pipeline_python = (
                 remote_home.rstrip("/")
@@ -1946,12 +2249,14 @@ class App(tk.Tk):
             command = (
                 "printf 'hostname='; hostname; "
                 "printf 'user='; whoami; "
-                f"if [[ -r {shlex.quote(qc_path)} ]]; then "
-                f"printf 'qc_file=readable\\n'; wc -l < {shlex.quote(qc_path)} | "
-                "awk '{print \"qc_lines=\" $1}'; "
-                f"stat -c 'qc_bytes=%s qc_modified=%y' {shlex.quote(qc_path)} 2>/dev/null || "
-                f"stat -f 'qc_bytes=%z qc_modified=%Sm' {shlex.quote(qc_path)}; "
-                "else printf 'qc_file=MISSING_OR_UNREADABLE\\n'; fi; "
+                + "".join(
+                    f"if [[ -d {shlex.quote(root)} ]]; then "
+                    f"printf 'search_root=readable:%s\\n' "
+                    f"{shlex.quote(root)}; "
+                    f"else printf 'search_root=MISSING:%s\\n' "
+                    f"{shlex.quote(root)}; fi; "
+                    for root in search_roots
+                )
                 + "for candidate in "
                 + " ".join(
                     shlex.quote(path)
@@ -1984,161 +2289,92 @@ class App(tk.Tk):
             self.notebook.select(self.logs_tab)
             self.status.set("A scan is already running; see Logs & Diagnostics.")
             return
-        entered_root = self.roots.get().strip()
-        if not entered_root:
+        entered_roots = parse_search_roots(self.roots.get())
+        if not entered_roots:
             messagebox.showwarning(
-                "Pipeline project root required",
-                "Enter the Firebird pipeline project root containing QC/run_status.csv.",
+                "Session search folder required",
+                "Enter one or more Firebird folders to search recursively. "
+                "Separate multiple folders with semicolons.",
             )
             return
 
         def action():
             started = datetime.now()
-            self.log("Scan started.")
+            self.log(
+                "Independent recursive session scan started. The old "
+                "pipeline QC approval file will not be read."
+            )
             self.work.put(("show_logs", None))
-            self.log(f"Configured project root: {entered_root}")
             remote_home = self.ssh().run('printf "%s" "$HOME"').strip()
-            project_root = expand_remote_path(entered_root, remote_home).rstrip("/")
-            qc_path = project_root + "/QC/run_status.csv"
-            self.log(f"Authoritative QC file: {qc_path}")
-            self.work.put(("status", "Reading authoritative QC approvals and selecting newest approved records..."))
-            qc_text = self.ssh().run(
-                f"test -f {shlex.quote(qc_path)} || "
-                f"{{ echo {shlex.quote('Authoritative QC file is missing: ' + qc_path)} >&2; exit 1; }}; "
-                f"cat -- {shlex.quote(qc_path)}",
-                timeout=900,
-            )
-            self.log(f"QC file read completed: {len(qc_text):,} characters.")
-            candidates = []
-            qc_rows = list(csv.DictReader(io.StringIO(qc_text)))
-            self.log(f"QC rows parsed: {len(qc_rows):,}.")
-            skipped_missing_identity = 0
-            for qc_row in qc_rows:
-                decision = str(qc_row.get("qc_decision") or "").strip().upper()
-                if decision not in {"APPROVED", "DONE"}:
-                    continue
-                run_dir = str(qc_row.get("run_dir") or "").strip()
-                if not run_dir:
-                    continue
-                metadata_path = run_dir.rstrip("/") + "/run_metadata.json"
-                video = str(qc_row.get("video") or "")
-                cell = str(qc_row.get("cell") or "").strip()
-                analysis = str(qc_row.get("analysis") or "").strip().lower()
-                if not video or not cell:
-                    skipped_missing_identity += 1
-                    continue
-                candidates.append(
-                    {
-                        "metadata_path": metadata_path,
-                        "video": video,
-                        "cell": cell,
-                        "analysis": analysis,
-                        "run_dir": run_dir,
-                        "run_index": int(qc_row.get("run_index") or -1),
-                        "run_timestamp": str(
-                            qc_row.get("date_run")
-                            or qc_row.get("collected_at")
-                            or ""
-                        ),
-                        "record_id": str(qc_row.get("record_id") or ""),
-                        "qc_decision": "APPROVED",
-                    }
-                )
-            self.log(
-                f"Approved QC rows eligible before deduplication: {len(candidates):,}; "
-                f"approved rows missing video/cell: {skipped_missing_identity:,}."
-            )
-
-            newest = {}
-            for candidate in candidates:
-                cell_key = (
-                    candidate["video"],
-                    candidate["cell"],
-                    candidate["analysis"],
-                )
-                rank = (
-                    candidate["run_timestamp"],
-                    candidate["run_index"],
-                    candidate["metadata_path"],
-                )
-                if cell_key not in newest or rank > newest[cell_key][0]:
-                    newest[cell_key] = (rank, candidate)
-            self.log(
-                f"Newest approved video/cell/analysis records after deduplication: {len(newest):,}."
-            )
-
-            records = []
-            selected = sorted(
-                newest.values(),
-                key=lambda item: (item[1]["video"], item[1]["cell"]),
-            )
-            self.log(
-                f"Resolving {len(selected):,} canonical session links in one batched SSH call."
-            )
-            resolver_input = [
-                {
-                    "run_dir": candidate["run_dir"],
-                    "metadata_path": candidate["metadata_path"],
-                }
-                for _, candidate in selected
+            roots = [
+                expand_remote_path(value, remote_home).rstrip("/")
+                for value in entered_roots
             ]
-            resolver_output = self.ssh().run(
-                "python3 -c " + shlex.quote(BATCH_SESSION_RESOLVER),
-                input_text=json.dumps(resolver_input),
-                timeout=1800,
+            for root in roots:
+                self.log(f"Recursive search root: {root}")
+            self.work.put((
+                "status",
+                "Recursively finding IDtracker sessions and run-metadata "
+                "links. Old QC approvals are not being consulted.",
+            ))
+            discovery_text = self.ssh().run(
+                "python3 -c " + shlex.quote(RECURSIVE_SESSION_DISCOVERY),
+                input_text=json.dumps({"roots": roots}),
+                timeout=3600,
             )
-            resolved_items = json.loads(resolver_output)
-            if len(resolved_items) != len(selected):
-                raise RuntimeError(
-                    "Canonical-session resolver returned a different record count: "
-                    f"{len(resolved_items)} versus {len(selected)}"
-                )
-            self.log("Canonical session-link batch completed.")
-
-            blocked_trajectory_count = 0
-            for position, ((_, candidate), resolved) in enumerate(
-                zip(selected, resolved_items), 1
-            ):
-                if position == 1 or position % 100 == 0 or position == len(selected):
-                    message = f"Interpreting resolved sessions: {position:,} of {len(selected):,}."
+            discovery = json.loads(discovery_text)
+            for missing_root in discovery.get("missing_roots") or []:
+                self.log(f"WARNING: search root does not exist: {missing_root}")
+            self.log(
+                f"Recursive discovery found "
+                f"{discovery.get('session_folders_found', 0):,} session "
+                f"folder(s) and "
+                f"{discovery.get('metadata_files_found', 0):,} run-metadata "
+                "file(s)."
+            )
+            records = []
+            discovered_records = discovery.get("records") or []
+            for position, discovered in enumerate(discovered_records, 1):
+                if (
+                    position == 1
+                    or position % 100 == 0
+                    or position == len(discovered_records)
+                ):
+                    message = (
+                        f"Interpreting discovered sessions: {position:,} of "
+                        f"{len(discovered_records):,}."
+                    )
                     self.log(message)
                     self.work.put(("status", message))
-                run_dir = candidate["run_dir"]
-                metadata = resolved.get("metadata") or {}
-                candidate["source_toml"] = str(resolved.get("source_toml") or "")
-                trajectory = str(resolved.get("trajectory") or "")
+                trajectory = str(discovered.get("trajectory") or "")
                 trajectory_status = str(
-                    resolved.get("trajectory_resolution_status")
+                    discovered.get("trajectory_resolution_status")
                     or "NO_TRAJECTORY"
                 )
-                trajectory_diagnostic = trajectory_status
                 raw_trajectory_candidates = list(
-                    resolved.get("raw_trajectory_candidates") or []
+                    discovered.get("raw_trajectory_candidates") or []
                 )
-                session = str(resolved.get("session") or "")
-                if not session:
-                    self.log(
-                        f"WARNING: canonical session link is missing for QC "
-                        f"{candidate['record_id']} under {run_dir}"
-                    )
-                    continue
+                session = str(discovered.get("session") or "")
                 if not trajectory:
-                    blocked_trajectory_count += 1
                     self.log(
                         f"BLOCKED: {trajectory_status} in canonical session "
-                        f"{session} for QC {candidate['record_id']}. "
+                        f"{session} for discovered record "
+                        f"{discovered.get('session_record_id')}. "
                         "No recognized validated, without-gaps, or raw "
                         "IDtracker trajectory is available."
                     )
                 elif trajectory_status.startswith("IDTRACKER_RAW_"):
                     self.log(
-                        f"RAW FALLBACK: {trajectory_status} selected for QC "
-                        f"{candidate['record_id']} at {trajectory}. Missing "
-                        "coordinates will be preserved and reported."
+                        f"RAW FALLBACK: {trajectory_status} selected for "
+                        f"{discovered.get('session_record_id')} at "
+                        f"{trajectory}. Missing coordinates will be "
+                        "preserved and reported."
                     )
-                session_json = resolved.get("session_json") or {}
+                session_json = discovered.get("session_json") or {}
                 pairs = []
-                toml_raw = str(resolved.get("source_toml_text") or "")
+                toml_raw = str(
+                    discovered.get("source_toml_text") or ""
+                )
                 if toml_raw:
                     try:
                         pairs.extend(
@@ -2148,8 +2384,8 @@ class App(tk.Tk):
                         )
                     except Exception as exc:
                         self.log(
-                            f"WARNING: source TOML interval could not be read for "
-                            f"QC {candidate['record_id']}: {exc}"
+                            "WARNING: source TOML interval could not be read "
+                            f"for {discovered.get('session_record_id')}: {exc}"
                         )
                 pairs.extend(find_interval_candidates(session_json))
                 starts = sorted(set(pair[0] for pair in pairs))
@@ -2164,16 +2400,26 @@ class App(tk.Tk):
                 else:
                     detected, source, approved = ",".join(map(str, starts)), "conflicting interval fields", ""
                     status = "AMBIGUOUS — entry required"
-                if normalized_video_name(candidate["video"]) in KNOWN_START_REVIEW_STEMS:
+                video = str(discovered.get("video") or "")
+                cell_label = str(
+                    discovered.get("cell_label") or ""
+                ).strip().upper()
+                analysis = str(
+                    discovered.get("analysis") or ""
+                ).strip().lower()
+                if normalized_video_name(video) in KNOWN_START_REVIEW_STEMS:
                     approved = ""
                     status = "KNOWN MANUAL START REVIEW — entry required"
-                video_fields = parse_video_fields(candidate["video"])
+                video_fields = parse_video_fields(video)
                 if not video_fields["video_year"]:
                     self.log(
                         "WARNING: video_year left blank because no recognized "
                         "2025 or 2026 recording date could be parsed from "
-                        f"{candidate['video']}"
+                        f"{video}"
                     )
+                record_id = str(
+                    discovered.get("session_record_id") or ""
+                )
                 records.append(
                     {"session": session, "trajectory": trajectory, "detected": detected,
                      "source": source, "start": approved, "status": status, "use": "No",
@@ -2185,35 +2431,99 @@ class App(tk.Tk):
                          f"Detected from {source}" if approved else ""
                      ),
                      "trajectory_status": trajectory_status,
-                     "trajectory_diagnostic": trajectory_diagnostic,
+                     "trajectory_diagnostic": trajectory_status,
                      "raw_trajectory_candidates": raw_trajectory_candidates,
                      "processable": bool(trajectory),
-                     "video": candidate["video"],
-                     "cell_label": candidate["cell"],
-                     "analysis": candidate["analysis"],
-                     "qc_record_id": candidate["record_id"],
-                     "cell": f"{PurePosixPath(candidate['video']).name} / {candidate['cell']}",
+                     "video": video,
+                     "cell_label": cell_label,
+                     "analysis": analysis,
+                     "qc_record_id": record_id,
+                     "session_record_id": record_id,
+                     "cell": f"{PurePosixPath(video).name} / {cell_label}",
                      "run": (
-                         f"{candidate['run_timestamp']} (#{candidate['run_index']}; "
-                         f"QC {candidate['record_id']})"
+                         f"{discovered.get('run_timestamp', '')} "
+                         f"(run #{discovered.get('run_index', '')}; "
+                         f"attempt #{discovered.get('attempt_index', '')}; "
+                         f"record {record_id})"
                      ),
-                     "toml": candidate["source_toml"],
-                     "selection_reason": (
-                         "Newest date_run, then run_index, among authoritative QC "
-                         f"records marked APPROVED for video/cell/analysis ({candidate['analysis']})"
+                     "toml": discovered.get("source_toml", ""),
+                     "run_timestamp": discovered.get("run_timestamp", ""),
+                     "session_run_timestamp": discovered.get(
+                         "session_run_timestamp", ""
+                     ),
+                     "run_index": discovered.get("run_index", ""),
+                     "attempt_index": discovered.get("attempt_index", ""),
+                     "trajectory_mtime_ns": discovered.get(
+                         "trajectory_mtime_ns", ""
+                     ),
+                     "metadata_path": discovered.get("metadata_path", ""),
+                     "identity_source": discovered.get(
+                         "identity_source", ""
                      ),
                      **video_fields,
                  }
                 )
                 if not trajectory:
                     records[-1]["trajectory_status"] = "NO_USABLE_TRAJECTORY"
+
+            records = deduplicate_discovered_sessions(records)
+            output_root = expand_remote_path(
+                self.output_root.get(), remote_home
+            ).rstrip("/")
+            state_request = {
+                "state_dir": output_root + "/postprocessing_qc",
+                "event_fields": QC_EVENT_FIELDS,
+                "approved_qc_fields": APPROVED_QC_FIELDS,
+                "canonical_record_ids": [
+                    record.get("session_record_id")
+                    for record in records
+                    if record.get("canonical_for_review")
+                ],
+                "events": [],
+            }
+            state_text = self.ssh().run(
+                "python3 -c " + shlex.quote(REMOTE_QC_STATE),
+                input_text=json.dumps(state_request),
+                timeout=900,
+            )
+            state = json.loads(state_text)
+            apply_latest_qc_events(records, state.get("current") or [])
+            incomplete_identity = 0
+            superseded = 0
+            canonical = 0
+            for record in records:
+                if record.get("duplicate_status") == "IDENTITY_INCOMPLETE":
+                    incomplete_identity += 1
+                elif record.get("canonical_for_review"):
+                    canonical += 1
+                else:
+                    superseded += 1
+                record["processable"] = bool(
+                    record.get("trajectory")
+                    and record.get("canonical_for_review")
+                    and record.get("session_key")
+                )
+                record["processed_status"] = (
+                    "OUTPUT AVAILABLE"
+                    if record.get("source_result_file")
+                    else "NOT PROCESSED"
+                )
+                record["missing_summary"] = ""
+                record["selection_reason"] = (
+                    "Newest recursively discovered run for video/cell/"
+                    "analysis; old pipeline QC approval was not consulted"
+                    if record.get("canonical_for_review")
+                    else record.get("duplicate_status")
+                )
+            self.work.put(("qc_state", state))
             self.work.put(("scan", records))
             elapsed = (datetime.now() - started).total_seconds()
             self.log(
-                f"Scan completed: {len(records):,} sessions resolved in "
-                f"{elapsed:.1f} seconds; {blocked_trajectory_count:,} blocked "
-                "because no recognized IDtracker trajectory file was available. "
-                "Raw files were selected when no gap-filled file existed."
+                f"Scan completed: {len(records):,} linked/bare session "
+                f"record(s) in {elapsed:.1f} seconds; {canonical:,} newest "
+                f"canonical run(s); {superseded:,} retained superseded "
+                f"duplicate(s); {incomplete_identity:,} session(s) need "
+                "video/cell/analysis identity before processing."
             )
 
         self.scan_running = True
@@ -2239,7 +2549,7 @@ class App(tk.Tk):
                 restored_message = (
                     f" Restored {restored} saved start decision(s); "
                     f"{len(unmatched)} saved decision(s) did not match the "
-                    "current approved-session scan."
+                    "current recursive session scan."
                 )
                 self.log(restored_message.strip())
                 for item in unmatched:
@@ -2251,7 +2561,7 @@ class App(tk.Tk):
                 )
                 messagebox.showerror(
                     "Saved starts not applied",
-                    "The approved-session scan succeeded, but no saved start "
+                    "The recursive session scan succeeded, but no saved start "
                     "decision was applied because validation failed.\n\n"
                     + str(exc),
                 )
@@ -2268,11 +2578,22 @@ class App(tk.Tk):
             + sorted({r["act"] for r in records if r["act"]})
         )
         self.apply_filters()
+        self._render_postprocessing_qc_tables()
         self.notebook.select(self.sessions_tab)
         zero_or_missing = sum(
             not str(record["start"]).strip() for record in records
         )
-        blocked = sum(not record.get("processable") for record in records)
+        no_trajectory = sum(
+            not bool(record.get("trajectory")) for record in records
+        )
+        superseded = sum(
+            record.get("duplicate_status") == "SUPERSEDED_DUPLICATE"
+            for record in records
+        )
+        incomplete = sum(
+            record.get("duplicate_status") == "IDENTITY_INCOMPLETE"
+            for record in records
+        )
         known = sum(
             record["status"].startswith("KNOWN MANUAL") for record in records
         )
@@ -2281,11 +2602,422 @@ class App(tk.Tk):
             for record in records
         )
         self.status.set(
-            f"Newest approved cell runs: {len(records)} total; {ready} are ready "
-            f"to process; {zero_or_missing} require a start; {blocked} lack a "
-            "recognized IDtracker trajectory of any supported type; "
-            f"{known} match the collaborator list. Older repeats were excluded."
+            f"Recursive discovery: {len(records)} session record(s); {ready} "
+            f"newest runs are ready to process; {zero_or_missing} require a "
+            f"start; {no_trajectory} lack a trajectory; {superseded} older "
+            f"duplicates are retained but ineligible; {incomplete} need "
+            f"identity metadata; {known} match the collaborator start list."
             + restored_message
+        )
+
+    def _render_postprocessing_qc_tables(self):
+        if not hasattr(self, "qc_table"):
+            return
+        for item in self.qc_table.get_children():
+            self.qc_table.delete(item)
+        self.qc_rows.clear()
+        canonical = [
+            record for record in self.all_records
+            if record.get("canonical_for_review")
+        ]
+        qc_columns = self.qc_table["columns"]
+        for record in sorted(
+            canonical,
+            key=lambda item: (
+                str(item.get("video_name") or ""),
+                str(item.get("cell_label") or ""),
+            ),
+        ):
+            item = self.qc_table.insert(
+                "",
+                "end",
+                values=tuple(
+                    record.get(column, "") for column in qc_columns
+                ),
+            )
+            self.qc_rows[item] = record
+
+        for item in self.duplicate_table.get_children():
+            self.duplicate_table.delete(item)
+        self.duplicate_rows.clear()
+        duplicates = make_duplicate_report(self.all_records)
+        duplicate_by_id = {
+            str(record.get("session_record_id") or ""): record
+            for record in self.all_records
+        }
+        duplicate_columns = self.duplicate_table["columns"]
+        for summary in duplicates:
+            record = duplicate_by_id.get(
+                str(summary.get("session_record_id") or ""), summary
+            )
+            item = self.duplicate_table.insert(
+                "",
+                "end",
+                values=tuple(
+                    record.get(column, "") for column in duplicate_columns
+                ),
+            )
+            self.duplicate_rows[item] = record
+
+        approved = sum(
+            record.get("postprocessing_qc_decision") == "APPROVED"
+            for record in canonical
+        )
+        rerun = sum(
+            record.get("postprocessing_qc_decision") == "RERUN"
+            for record in canonical
+        )
+        unreviewed = len(canonical) - approved - rerun
+        self.qc_status.set(
+            f"{len(canonical)} newest session(s) are eligible for independent "
+            f"post-processing QC: {approved} approved, {rerun} marked rerun, "
+            f"{unreviewed} unreviewed. Only approved sessions enter "
+            "approved_results_latest.csv."
+        )
+        duplicate_keys = len(
+            {
+                record.get("session_key")
+                for record in self.all_records
+                if int(record.get("duplicate_count") or 0) > 1
+            }
+        )
+        self.duplicate_status_text.set(
+            f"{len(duplicates)} run record(s) belong to {duplicate_keys} "
+            "video/cell/analysis key(s) with repeats. Rank 1 is selected by "
+            "session/run timestamp, trajectory modification time, run and "
+            "attempt index, then path. All older runs remain visible."
+        )
+
+    def _selected_qc_records(self):
+        return [
+            self.qc_rows[item]
+            for item in self.qc_table.selection()
+            if item in self.qc_rows
+        ]
+
+    def open_selected_qc_pdf(self):
+        records = self._selected_qc_records()
+        if len(records) != 1:
+            messagebox.showinfo(
+                "Select one session",
+                "Select exactly one session in Post-processing QC.",
+            )
+            return
+        if not self.last_completed_local_folder:
+            messagebox.showinfo(
+                "Download not available",
+                "Process and finish the automatic CSV/PDF download first.",
+            )
+            return
+        remote_plot = str(records[0].get("plot_file") or "")
+        if not remote_plot:
+            messagebox.showinfo(
+                "No processed PDF",
+                "This session does not have a PDF from the current run.",
+            )
+            return
+        pdf = (
+            Path(self.last_completed_local_folder)
+            / "pdfs"
+            / PurePosixPath(remote_plot).name
+        )
+        if not pdf.is_file():
+            messagebox.showerror(
+                "Downloaded PDF not found",
+                "The expected PDF was not found in the latest completed "
+                f"download:\n\n{pdf}",
+            )
+            return
+        if sys.platform == "darwin":
+            subprocess.Popen(["open", str(pdf)])
+        else:
+            messagebox.showinfo("PDF location", str(pdf))
+
+    def _qc_event_for_record(self, record, decision, reason):
+        now = datetime.now().astimezone().isoformat(timespec="seconds")
+        return {
+            "qc_schema_version": QC_SCHEMA_VERSION,
+            "decision_id": (
+                datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+                + "_"
+                + uuid4().hex[:10]
+            ),
+            "decided_at": now,
+            "reviewer": getpass.getuser(),
+            "decision": decision,
+            "reason": reason,
+            "session_record_id": record.get("session_record_id", ""),
+            "session_key": record.get("session_key", ""),
+            "session_path": record.get("session", ""),
+            "trajectory_file": record.get("trajectory", ""),
+            "trajectory_source_kind": record.get(
+                "trajectory_status", ""
+            ),
+            "video": record.get("video", ""),
+            "cell_label": record.get("cell_label", ""),
+            "analysis_type": record.get("analysis", ""),
+            "camera": record.get("camera", ""),
+            "camera_id": record.get("camera_id", ""),
+            "video_year": record.get("video_year", ""),
+            "recording_date": record.get("recording_date", ""),
+            "recording_time": record.get("recording_time", ""),
+            "act": record.get("act", ""),
+            "session_run_timestamp": record.get(
+                "session_run_timestamp", ""
+            ),
+            "duplicate_rank": record.get("duplicate_rank", ""),
+            "duplicate_count": record.get("duplicate_count", ""),
+            "processing_batch_id": record.get(
+                "processing_batch_id", ""
+            ),
+            "processing_created_at": record.get(
+                "processing_created_at", ""
+            ),
+            "processing_execution_mode": record.get(
+                "processing_execution_mode", ""
+            ),
+            "source_result_file": record.get(
+                "source_result_file", ""
+            ),
+            "plot_file": record.get("plot_file", ""),
+            "script_version": SCRIPT_VERSION,
+        }
+
+    def _record_postprocessing_decisions(
+        self, records, decision, reason
+    ):
+        events = [
+            self._qc_event_for_record(record, decision, reason)
+            for record in records
+        ]
+
+        def action():
+            remote_home = self.ssh().run('printf "%s" "$HOME"').strip()
+            output_root = expand_remote_path(
+                self.output_root.get(), remote_home
+            ).rstrip("/")
+            request = {
+                "state_dir": output_root + "/postprocessing_qc",
+                "event_fields": QC_EVENT_FIELDS,
+                "approved_qc_fields": APPROVED_QC_FIELDS,
+                "canonical_record_ids": [
+                    item.get("session_record_id")
+                    for item in self.all_records
+                    if item.get("canonical_for_review")
+                ],
+                "events": events,
+            }
+            response = self.ssh().run(
+                "python3 -c " + shlex.quote(REMOTE_QC_STATE),
+                input_text=json.dumps(request),
+                timeout=900,
+            )
+            state = json.loads(response)
+            self.log(
+                f"Post-processing QC recorded {len(events)} {decision} "
+                f"decision(s). Approved data: "
+                f"{state.get('approved_session_count', 0)} sessions / "
+                f"{state.get('approved_row_count', 0)} animal rows. "
+                f"Rerun report: {state.get('rerun_session_count', 0)} "
+                "sessions."
+            )
+            self.work.put((
+                "qc_updated",
+                {
+                    "state": state,
+                    "decision": decision,
+                    "record_count": len(records),
+                },
+            ))
+
+        self._background(action)
+
+    def approve_postprocessing_sessions(self):
+        records = self._selected_qc_records()
+        if not records:
+            messagebox.showinfo(
+                "Select processed sessions",
+                "Select one or more newest sessions in Post-processing QC.",
+            )
+            return
+        invalid = [
+            record for record in records
+            if not record.get("canonical_for_review")
+            or not record.get("source_result_file")
+        ]
+        if invalid:
+            messagebox.showerror(
+                "Approval requires processed newest runs",
+                "Every approved session must be the newest duplicate and must "
+                "have a completed per-session result. Process these rows "
+                "before approval:\n\n"
+                + "\n".join(
+                    f"{record.get('video')} / "
+                    f"{record.get('cell_label')}"
+                    for record in invalid
+                ),
+            )
+            return
+        details = "\n".join(
+            f"{record.get('video')} / {record.get('cell_label')}"
+            for record in records
+        )
+        if not messagebox.askyesno(
+            "Approve post-processing results",
+            "Add these independently reviewed sessions to the authoritative "
+            "approved post-processing data file?\n\n"
+            + details
+            + "\n\nThe decision history remains append-only and reversible.",
+        ):
+            return
+        self._record_postprocessing_decisions(
+            records,
+            "APPROVED",
+            "Researcher approved post-processing PDF and result",
+        )
+
+    def rerun_postprocessing_sessions(self):
+        records = self._selected_qc_records()
+        if not records:
+            messagebox.showinfo(
+                "Select sessions",
+                "Select one or more sessions to mark for IDtracker rerun.",
+            )
+            return
+        reason = simpledialog.askstring(
+            "Reason for IDtracker rerun",
+            "Enter the problem or settings change needed. This text will be "
+            "written into the rerun report:",
+        )
+        if reason is None:
+            return
+        reason = reason.strip()
+        if not reason:
+            messagebox.showerror(
+                "Reason required",
+                "A rerun decision requires an actionable reason.",
+            )
+            return
+        self._record_postprocessing_decisions(records, "RERUN", reason)
+
+    def unreview_postprocessing_sessions(self):
+        records = self._selected_qc_records()
+        if not records:
+            messagebox.showinfo(
+                "Select sessions",
+                "Select one or more sessions to return to unreviewed.",
+            )
+            return
+        if not messagebox.askyesno(
+            "Return to unreviewed",
+            f"Return {len(records)} selected session(s) to UNREVIEWED?\n\n"
+            "A new provenance event will be added; earlier decisions are not "
+            "deleted.",
+        ):
+            return
+        self._record_postprocessing_decisions(
+            records,
+            "UNREVIEWED",
+            "Researcher returned session to unreviewed",
+        )
+
+    def load_postprocessing_qc_update(self, payload):
+        state = dict(payload.get("state") or {})
+        self.qc_state = state
+        apply_latest_qc_events(
+            self.all_records, state.get("current") or []
+        )
+        self.apply_filters()
+        self._render_postprocessing_qc_tables()
+        missing = state.get("missing_approved_sources") or []
+        if missing:
+            messagebox.showerror(
+                "Approved source missing",
+                "The decision was recorded, but one or more approved "
+                "per-session CSV files were missing and were not added to the "
+                "approved data file:\n\n"
+                + "\n".join(
+                    item.get("source_result_file", "") for item in missing
+                ),
+            )
+            return
+        self.notebook.select(self.qc_tab)
+        self._play_completion_sound()
+        messagebox.showinfo(
+            "Post-processing QC updated",
+            f"Recorded {payload.get('record_count', 0)} "
+            f"{payload.get('decision')} decision(s).\n\n"
+            f"Approved data now contains "
+            f"{state.get('approved_session_count', 0)} session(s) and "
+            f"{state.get('approved_row_count', 0)} animal row(s).\n"
+            f"Rerun report contains "
+            f"{state.get('rerun_session_count', 0)} session(s).",
+        )
+
+    def _qc_download_folder(self):
+        downloads = Path.home() / "Downloads"
+        base = downloads if downloads.is_dir() else Path.home()
+        folder = (
+            base
+            / "IDtracker_postprocessing_results"
+            / "postprocessing_qc"
+        )
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder
+
+    def _download_qc_file(self, state_key, prefix):
+        remote_path = str(self.qc_state.get(state_key) or "")
+        if not remote_path:
+            messagebox.showinfo(
+                "Run recursive scan first",
+                "Scan sessions first so the current QC-state paths can be "
+                "loaded from Firebird.",
+            )
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        destination = self._qc_download_folder() / f"{prefix}_{stamp}.csv"
+
+        def action():
+            self.ssh().download(remote_path, str(destination), timeout=900)
+            self.log(f"Downloaded post-processing QC file: {destination}")
+            self.work.put((
+                "status", f"Downloaded QC file to {destination}"
+            ))
+
+        self._background(action)
+
+    def download_approved_results(self):
+        self._download_qc_file(
+            "approved_path", "approved_postprocessing_results"
+        )
+
+    def download_rerun_report(self):
+        self._download_qc_file(
+            "rerun_path", "sessions_marked_for_idtracker_rerun"
+        )
+
+    def export_duplicate_report(self):
+        rows = make_duplicate_report(self.all_records)
+        if not rows:
+            messagebox.showinfo(
+                "No duplicate runs",
+                "The current recursive scan contains no repeated "
+                "video/cell/analysis session keys.",
+            )
+            return
+        stamp = datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+        destination = (
+            self._qc_download_folder()
+            / f"duplicate_session_audit_{stamp}.csv"
+        )
+        with destination.open("w", newline="", encoding="utf-8") as stream:
+            writer = csv.DictWriter(stream, fieldnames=list(rows[0]))
+            writer.writeheader()
+            writer.writerows(rows)
+        self.log(f"Exported duplicate session audit: {destination}")
+        messagebox.showinfo(
+            "Duplicate audit exported",
+            f"Saved {len(rows)} duplicate run record(s):\n\n{destination}",
         )
 
     def _settings_folder(self):
@@ -2652,7 +3384,7 @@ class App(tk.Tk):
             decision_message = (
                 f"{len(self.loaded_start_decisions)} start decision(s) are "
                 "queued and will be "
-                "matched after Scan approved runs."
+                "matched after recursive session discovery."
             )
         else:
             decision_message = (
@@ -2688,7 +3420,7 @@ class App(tk.Tk):
         if not rows:
             messagebox.showinfo(
                 "No missing starts",
-                "Every currently scanned approved session has a positive start.",
+                "Every currently eligible newest session has a positive start.",
             )
             return
         destination_text = filedialog.asksaveasfilename(
@@ -2745,7 +3477,7 @@ class App(tk.Tk):
         if not rows:
             messagebox.showinfo(
                 "Every session has a trajectory",
-                "Every scanned approved session has a recognized validated, "
+                "Every eligible newest session has a recognized validated, "
                 "without-gaps, or raw IDtracker trajectory.",
             )
             return
@@ -2880,7 +3612,7 @@ class App(tk.Tk):
         if not auditable:
             messagebox.showwarning(
                 "No auditable BA or fight sessions",
-                "Scan approved runs first. The audit needs either a final "
+                "Recursively scan sessions first. The audit needs either a final "
                 "positive start or one unambiguous positive detected interval.",
             )
             return
@@ -2904,7 +3636,7 @@ class App(tk.Tk):
 
         def action():
             self.log(
-                f"Jump audit started for {len(auditable)} approved BA/fight "
+                f"Jump audit started for {len(auditable)} newest BA/fight "
                 f"session(s) with positive start evidence; "
                 f"{using_detected_start} use a positive detected interval for "
                 "audit only; "
@@ -2938,7 +3670,7 @@ class App(tk.Tk):
         self.jump_audit_running = True
         self.jump_audit_button.configure(state="disabled")
         self.status.set(
-            f"Auditing {len(auditable)} approved BA/fight sessions with "
+            f"Auditing {len(auditable)} newest BA/fight sessions with "
             "positive start evidence..."
         )
 
@@ -2980,7 +3712,7 @@ class App(tk.Tk):
         )
         path_text = self._write_jump_audit_files()
         self.jump_audit_status.set(
-            f"Audited {result.get('audited_session_count', 0)} approved "
+            f"Audited {result.get('audited_session_count', 0)} newest "
             f"BA/fight sessions across {len(self.jump_audit_summaries)} videos; "
             f"{result.get('detected_start_audit_only_count', 0)} session(s) "
             "used detected intervals for audit only. "
@@ -3094,7 +3826,7 @@ class App(tk.Tk):
         )
         if not messagebox.askyesno(
             "Approve disturbance-adjusted starts",
-            "Apply these recommendations to every approved session belonging "
+            "Apply these recommendations to every newest eligible session belonging "
             "to each video?\n\n"
             + details
             + "\n\nThe original starts and audit evidence will remain in "
@@ -3132,11 +3864,11 @@ class App(tk.Tk):
         self._write_jump_audit_files()
         self.log(
             f"Approved {len(summaries)} video-level jump-audit start "
-            f"recommendation(s), updating {changed} approved session row(s)."
+            f"recommendation(s), updating {changed} newest session row(s)."
         )
         messagebox.showinfo(
             "Start recommendations approved",
-            f"Updated {changed} approved session row(s).\n\n"
+            f"Updated {changed} newest session row(s).\n\n"
             "The final start will appear near the front of the results CSV; "
             "the archived original and decision provenance will appear near "
             "the end.",
@@ -3174,7 +3906,42 @@ class App(tk.Tk):
                 continue
             if (
                 start_mode == "No usable trajectory"
-                and record.get("processable")
+                and record.get("trajectory")
+            ):
+                continue
+            if (
+                start_mode == "Newest eligible only"
+                and not record.get("canonical_for_review")
+            ):
+                continue
+            if (
+                start_mode == "Superseded duplicates"
+                and record.get("duplicate_status")
+                != "SUPERSEDED_DUPLICATE"
+            ):
+                continue
+            if (
+                start_mode == "Identity incomplete"
+                and record.get("duplicate_status")
+                != "IDENTITY_INCOMPLETE"
+            ):
+                continue
+            qc_decision = record.get(
+                "postprocessing_qc_decision", "UNREVIEWED"
+            )
+            if (
+                start_mode == "Post-processing QC unreviewed"
+                and qc_decision != "UNREVIEWED"
+            ):
+                continue
+            if (
+                start_mode == "Post-processing QC approved"
+                and qc_decision != "APPROVED"
+            ):
+                continue
+            if (
+                start_mode == "Post-processing QC rerun"
+                and qc_decision != "RERUN"
             ):
                 continue
             if analysis != "All analyses" and record.get("analysis") != analysis:
@@ -3192,6 +3959,8 @@ class App(tk.Tk):
                     "recording_date",
                     "recording_time", "act", "cell_label", "analysis",
                     "trajectory_status", "status", "qc_record_id",
+                    "duplicate_status", "postprocessing_qc_decision",
+                    "session_record_id", "identity_source",
                 )
             ).lower()
             if search and search not in searchable:
@@ -3200,7 +3969,8 @@ class App(tk.Tk):
         self.filtered_records = filtered
         self._render_records()
         self.status.set(
-            f"Showing {len(filtered)} of {len(self.all_records)} approved sessions."
+            f"Showing {len(filtered)} of {len(self.all_records)} recursively "
+            "discovered session records."
         )
 
     def sort_by(self, column):
@@ -3233,7 +4003,8 @@ class App(tk.Tk):
             reverse=self.sort_reverse,
         )
         value_keys = (
-            "use", "trajectory_status", "status", "start", "video_name", "camera",
+            "use", "postprocessing_qc_decision", "duplicate_status",
+            "trajectory_status", "status", "start", "video_name", "camera",
             "video_year", "recording_date", "recording_time", "act", "cell_label",
             "analysis", "run_timestamp", "qc_record_id",
         )
@@ -3249,6 +4020,15 @@ class App(tk.Tk):
             return
         record = self.rows[selected[0]]
         self.details.set(
+            f"Post-processing QC: "
+            f"{record.get('postprocessing_qc_decision') or 'UNREVIEWED'} | "
+            f"Duplicate selection: "
+            f"{record.get('duplicate_status') or 'unknown'} "
+            f"(rank {record.get('duplicate_rank') or 'N/A'} of "
+            f"{record.get('duplicate_count') or 'N/A'})\n"
+            f"Identity source: "
+            f"{record.get('identity_source') or 'unknown'} | "
+            f"Session record: {record.get('session_record_id')}\n"
             f"Detected start: {record.get('detected') or 'none'} | "
             f"Interval evidence: {record.get('source') or 'none'}\n"
             f"Final start decision: {record.get('start') or 'none'} | "
@@ -3277,15 +4057,32 @@ class App(tk.Tk):
             return
         if column == "#1":
             if not self.rows[item].get("processable"):
+                record = self.rows[item]
+                if record.get("duplicate_status") == "SUPERSEDED_DUPLICATE":
+                    explanation = (
+                        "This is an older duplicate. It remains visible for "
+                        "provenance, but only rank 1 can be processed."
+                    )
+                elif record.get("duplicate_status") == "IDENTITY_INCOMPLETE":
+                    explanation = (
+                        "This bare session lacks a complete video/cell/"
+                        "analysis identity. Include its linked run-metadata "
+                        "folder in the recursive roots; identity will not be "
+                        "guessed."
+                    )
+                else:
+                    explanation = (
+                        "This session has no recognized validated, "
+                        "without-gaps, or raw IDtracker trajectory file."
+                    )
                 messagebox.showwarning(
                     "Processing blocked",
-                    "This session has no recognized validated, without-gaps, "
-                    "or raw IDtracker trajectory file.",
+                    explanation,
                 )
                 return
             self.rows[item]["use"] = "No" if self.rows[item]["use"] == "Yes" else "Yes"
             self._refresh(item)
-        elif column == "#4":
+        elif column == "#6":
             self.edit_start()
 
     def check_all_filtered_ready(self):
@@ -3300,14 +4097,14 @@ class App(tk.Tk):
                 checked += 1
         self._render_records()
         self.status.set(
-            f"Checked {checked} filtered ready approved session(s)."
+            f"Checked {checked} filtered newest ready session(s)."
         )
 
     def uncheck_all_sessions(self):
         for record in self.all_records:
             record["use"] = "No"
         self._render_records()
-        self.status.set("Unchecked all approved sessions.")
+        self.status.set("Unchecked all discovered sessions.")
 
     def edit_start(self):
         selected = self.table.selection()
@@ -3617,6 +4414,40 @@ class App(tk.Tk):
         )
         ssh.run(command, input_text=text, timeout=300)
 
+    def _load_result_qc_summaries(self, ssh, remote_python, records):
+        items = [
+            {
+                "session_record_id": record["session_record_id"],
+                "source_result_file": record["source_result_file"],
+            }
+            for record in records
+            if record.get("source_result_file")
+        ]
+        if not items:
+            return
+        response = ssh.run(
+            f"{shlex.quote(remote_python)} -c "
+            + shlex.quote(REMOTE_RESULT_QC_SUMMARY),
+            input_text=json.dumps(items),
+            timeout=900,
+        )
+        summaries = {
+            str(item.get("session_record_id") or ""): item
+            for item in json.loads(response)
+        }
+        for record in records:
+            summary = summaries.get(
+                str(record.get("session_record_id") or "")
+            )
+            if not summary:
+                continue
+            record["processed_status"] = (
+                "OUTPUT AVAILABLE"
+                if summary.get("available")
+                else "OUTPUT MISSING"
+            )
+            record["missing_summary"] = summary.get("summary", "")
+
     def _run_slurm_batch(
         self,
         chosen,
@@ -3652,7 +4483,7 @@ class App(tk.Tk):
 
         self.log(
             f"Preparing SLURM batch {batch_token} for {len(chosen)} "
-            f"approved ready session(s); script version={SCRIPT_VERSION}."
+            f"newest ready session(s); script version={SCRIPT_VERSION}."
         )
         for record in blocked:
             self.log(
@@ -3707,6 +4538,13 @@ class App(tk.Tk):
                 r"[^A-Za-z0-9_.-]+", "_", plot_identity
             ).strip("._") or f"session_{index}"
             plot_output = f"{plot_stage}/{index:05d}__{plot_stem}.pdf"
+            record["source_result_file"] = result_path
+            record["plot_file"] = (
+                f"{plot_folder}/{index:05d}__{plot_stem}.pdf"
+            )
+            record["processing_batch_id"] = batch_token
+            record["processing_created_at"] = processing_created_at
+            record["processing_execution_mode"] = "SLURM_ARRAY"
             processor_args = [
                 "--trajectory", record["trajectory"],
                 "--session", record["session"],
@@ -3918,6 +4756,9 @@ class App(tk.Tk):
                 )
             if summary["complete"]:
                 complete = summary["complete"]
+                self._load_result_qc_summaries(
+                    ssh, remote_python, chosen
+                )
                 self.work.put(("combined_ready", complete["combined_output"]))
                 self.work.put(("plots_ready", complete["pdf_folder"]))
                 self.work.put((
@@ -4206,9 +5047,14 @@ class App(tk.Tk):
             for index, record in enumerate(chosen, 1):
                 self.work.put(("status", f"Processing reviewed session {index} of {len(chosen)}..."))
                 safe_name = PurePosixPath(record["session"]).name.replace(" ", "_")
+                safe_record_id = re.sub(
+                    r"[^A-Za-z0-9_.-]+",
+                    "_",
+                    str(record["session_record_id"]),
+                ).strip("._")
                 destination = (
                     output_root.rstrip("/")
-                    + f"/{safe_name}/processed_result_latest.csv"
+                    + f"/direct_results/{safe_name}__{safe_record_id}.csv"
                 )
                 plot_identity = (
                     f"{PurePosixPath(record['video']).stem}"
@@ -4219,6 +5065,11 @@ class App(tk.Tk):
                     r"[^A-Za-z0-9_.-]+", "_", plot_identity
                 ).strip("._") or f"session_{index}"
                 plot_destination = plot_stage + f"/{plot_stem}.pdf"
+                record["source_result_file"] = destination
+                record["plot_file"] = plot_folder + f"/{plot_stem}.pdf"
+                record["processing_batch_id"] = batch_token
+                record["processing_created_at"] = processing_created_at
+                record["processing_execution_mode"] = "DIRECT_SSH"
                 command_parts = [
                         "env",
                         shlex.quote("MPLCONFIGDIR=" + matplotlib_cache),
@@ -4354,6 +5205,9 @@ class App(tk.Tk):
                 "an incomplete batch cannot replace it."
             )
             self.ssh().run(promote_command, timeout=300)
+            self._load_result_qc_summaries(
+                self.ssh(), remote_python, chosen
+            )
             self.work.put(("combined_ready", combined_destination))
             self.work.put(("plots_ready", plot_folder))
             self.work.put((
